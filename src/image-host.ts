@@ -7,7 +7,6 @@
  *   - 脚本需 export default 一个函数，接收图片数据，返回公网 URL
  *   - 支持 Buffer、base64、文件路径三种输入
  */
-import { readFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import { resolve } from "node:path"
 import type { Logger } from "@yunzai-ng/types"

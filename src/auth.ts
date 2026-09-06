@@ -15,11 +15,17 @@ interface CachedToken {
   expiresAt: number
 }
 
+/**
+ *
+ */
 export class TokenManager {
   private token = ""
   private expiresAt = 0
   private refreshPromise: Promise<string> | null = null
 
+  /**
+   *
+   */
   constructor(
     private account: QQBotAccount,
     private http: HttpClient,
@@ -27,6 +33,9 @@ export class TokenManager {
     private kv?: KvNamespace
   ) {}
 
+  /**
+   *
+   */
   async getToken(): Promise<string> {
     if (this.account.token) {
       return this.account.token
@@ -107,10 +116,16 @@ export class TokenManager {
     }
   }
 
+  /**
+   *
+   */
   getApiBase(): string {
     return this.account.sandbox ? SANDBOX_API_BASE : API_BASE
   }
 
+  /**
+   *
+   */
   async getAuthHeader(): Promise<Record<string, string>> {
     const token = await this.getToken()
     return { Authorization: `QQBot ${token}` }

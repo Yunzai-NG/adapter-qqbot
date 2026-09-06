@@ -4,8 +4,17 @@
  * 支持格式：PNG, JPEG, GIF, WebP
  */
 
+/**
+ *
+ */
 export interface ImageSize {
+  /**
+   *
+   */
   width: number
+  /**
+   *
+   */
   height: number
 }
 

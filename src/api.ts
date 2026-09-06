@@ -16,7 +16,6 @@ import type {
   UploadMediaResponse,
   CreateDirectSessionRequest,
   CreateDirectSessionResponse,
-  QQUser,
   QQBotSelfInfo,
   QQUserInfo,
   QQBotError,
@@ -30,6 +29,9 @@ import type {
 
 /** API 错误 */
 export class QQBotApiError extends Error {
+  /**
+   *
+   */
   constructor(
     message: string,
     public code: number,
@@ -42,6 +44,9 @@ export class QQBotApiError extends Error {
 
 /** API 客户端 */
 export class ApiClient {
+  /**
+   *
+   */
   constructor(
     private tokenManager: TokenManager,
     private http: HttpClient,

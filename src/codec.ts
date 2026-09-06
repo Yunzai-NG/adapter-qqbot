@@ -7,11 +7,17 @@
  *   - 图片需先上传获取 URL 或使用 file_image 字段
  *   - @提及使用 <@user_id> 格式
  */
-import type { Segment, ImageSegment, AtSegment, MediaRef } from "@yunzai-ng/types"
+import type { Segment, ImageSegment, MediaRef } from "@yunzai-ng/types"
 
 /** QQ Bot 消息段 */
 export interface QQBotSegment {
+  /**
+   *
+   */
   type: string
+  /**
+   *
+   */
   data: Record<string, unknown>
 }
 

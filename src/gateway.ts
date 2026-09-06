@@ -18,8 +18,17 @@ import { parseShard } from "./config.js"
 
 /** Gateway 事件回调 */
 export interface GatewayHooks {
+  /**
+   *
+   */
   onEvent: (eventType: string, data: unknown) => void
+  /**
+   *
+   */
   onReady: (data: ReadyData) => void
+  /**
+   *
+   */
   onClosed: (reason: string) => void
 }
 
@@ -33,6 +42,9 @@ export class Gateway {
   private reconnectTimer: NodeJS.Timeout | null = null
   private closed = false
 
+  /**
+   *
+   */
   constructor(
     private account: QQBotAccount,
     private tokenManager: TokenManager,

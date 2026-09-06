@@ -413,7 +413,7 @@ export function createQQBotBot(
           host.logger.info(`频道消息图片类型: ${image.kind}`)
 
           switch (image.kind) {
-            case "url":
+            case "url": {
               // 公网 URL 使用 image 字段
               const request: SendMessageRequest = {
                 content: text || "",
@@ -427,6 +427,7 @@ export function createQQBotBot(
                 time: new Date(response.timestamp).getTime(),
                 raw: response
               }
+            }
             case "base64":
               imageBuffer = Buffer.from(image.base64, "base64")
               break
@@ -741,7 +742,7 @@ export function createQQBotBot(
       }
     },
 
-    async getGroupMemberList(gid: string, opts?: MemberListOptions): Promise<MemberInfo[]> {
+    async getGroupMemberList(gid: string, _opts?: MemberListOptions): Promise<MemberInfo[]> {
       // QQ Bot API:
       // - 群聊: GET /v2/groups/{group_openid}/members
       //   返回: [{ member_openid, join_type, role }]
@@ -784,7 +785,7 @@ export function createQQBotBot(
       }
     },
 
-    async setGroupCard(gid: string, uid: string, card: string): Promise<void> {
+    async setGroupCard(_gid: string, _uid: string, _card: string): Promise<void> {
       // QQ Bot API 不支持修改群名片
       // 群聊和频道均无此 API
       host.logger.warn("QQ Bot 不支持修改群名片")
@@ -805,7 +806,7 @@ export function createQQBotBot(
       }
     },
 
-    async muteGroupAll(gid: string, enable: boolean): Promise<void> {
+    async muteGroupAll(_gid: string, _enable: boolean): Promise<void> {
       // QQ Bot API 不支持全体禁言
       // 群聊和频道均无此 API
       host.logger.warn("QQ Bot 不支持全体禁言")
@@ -825,13 +826,13 @@ export function createQQBotBot(
       }
     },
 
-    async quitGroup(gid: string): Promise<void> {
+    async quitGroup(_gid: string): Promise<void> {
       // QQ Bot API 不支持主动退群
       // 群聊和频道均无此 API
       host.logger.warn("QQ Bot 不支持主动退群")
     },
 
-    async handleFriendRequest(flag: string, approve: boolean, remark?: string): Promise<void> {
+    async handleFriendRequest(_flag: string, _approve: boolean, _remark?: string): Promise<void> {
       // QQ Bot API 不支持处理好友请求
       // 群聊和 C2C 私聊均无此 API
       host.logger.warn("QQ Bot 不支持处理好友请求")
@@ -851,7 +852,7 @@ export function createQQBotBot(
       await api.handleGroupJoinRequest(groupOpenId, memberOpenId, op, joinRequestId, reason)
     },
 
-    async setReaction(messageId: string, emojiId: string, add = true): Promise<void> {
+    async setReaction(messageId: string, emojiId: string, _add = true): Promise<void> {
       // QQ Bot API:
       // - 频道: PUT /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
       //   参数: type (1=系统表情, 2=emoji), id (表情 ID)
@@ -861,7 +862,7 @@ export function createQQBotBot(
       host.logger.warn("QQ Bot 仅频道支持表情表态，可通过 callApi 实现")
     },
 
-    async uploadGroupFile(gid: string, file: string, name: string, folder?: string): Promise<void> {
+    async uploadGroupFile(_gid: string, _file: string, _name: string, _folder?: string): Promise<void> {
       // QQ Bot API:
       // - 群聊: POST /v2/groups/{group_openid}/files
       //   请求体: { file_type, url, srv_send_msg }
@@ -873,7 +874,7 @@ export function createQQBotBot(
       host.logger.warn("QQ Bot 文件上传需通过富媒体接口，可通过 callApi 实现")
     },
 
-    async getMessage(messageId: string): Promise<MessageRecord | undefined> {
+    async getMessage(_messageId: string): Promise<MessageRecord | undefined> {
       // QQ Bot API 不支持获取消息详情
       // 群聊、C2C 私聊、频道均无此 API
       return undefined

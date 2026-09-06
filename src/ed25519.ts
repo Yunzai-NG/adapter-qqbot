@@ -22,6 +22,9 @@ export class Ed25519 {
   private secretKey: Uint8Array
   private publicKey: Uint8Array
 
+  /**
+   *
+   */
   constructor(secret: string) {
     const keyPair = generateKeyPair(secret)
     this.secretKey = keyPair.secretKey
