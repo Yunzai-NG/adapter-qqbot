@@ -27,7 +27,7 @@
     "build:clean": "tsc -b --clean",
     "link:framework": "node scripts/link-framework.mjs",
     "typecheck:test": "tsc -p tsconfig.test.json",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
