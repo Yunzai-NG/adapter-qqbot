@@ -24,7 +24,7 @@ import type {
   ForwardNode
 } from "@yunzai-ng/types"
 import { toSegments } from "@yunzai-ng/core"
-import { encodeSegments, PLATFORM } from "./codec.js"
+import { encodeSegments, PLATFORM, addGuildPrefix, stripGuildPrefix } from "./codec.js"
 import { decodeEvent } from "./events.js"
 import type { QQBotAccount } from "./config.js"
 import { TokenManager } from "./auth.js"
@@ -68,13 +68,24 @@ async function readFileAsBase64(filePath: string): Promise<string> {
   return buffer.toString("base64")
 }
 
+/**
+ * 将频道场景 gid（qg_ 前缀或「频道号-子频道」组合格式）还原为纯 guild_id。
+ * 群聊 gid 为 32 位大写十六进制，不含 "-"，不会误入此函数的拆分逻辑。
+ */
+function plainGuildId(gid: string): string {
+  const plain = stripGuildPrefix(gid)
+  const dash = plain.indexOf("-")
+  return dash === -1 ? plain : plain.slice(0, dash)
+}
+
 /** 声明支持的能力 */
 const CAPS: readonly BotCapability[] = [
   "recall",
   "forward",
   "groupCard",
   "groupMute",
-  "groupKick"
+  "groupKick",
+  "groupRequest"
 ]
 
 /** 创建 BotDriver */
@@ -103,7 +114,8 @@ export function createQQBotBot(
         if (eventType === "DIRECT_MESSAGE_CREATE") {
           const dmData = data as { author?: { id?: string }; guild_id?: string }
           if (dmData.author?.id && dmData.guild_id) {
-            directMessageGuildMap.set(dmData.author.id, dmData.guild_id)
+            // 键与 decodeDirectMessage 产出的带 qg_ 前缀的 uid 保持一致
+            directMessageGuildMap.set(addGuildPrefix(dmData.author.id), dmData.guild_id)
           }
         }
 
@@ -177,7 +189,8 @@ export function createQQBotBot(
             if (packet.t === "DIRECT_MESSAGE_CREATE") {
               const dmData = packet.d as { author?: { id?: string }; guild_id?: string }
               if (dmData.author?.id && dmData.guild_id) {
-                directMessageGuildMap.set(dmData.author.id, dmData.guild_id)
+                // 键与 decodeDirectMessage 产出的带 qg_ 前缀的 uid 保持一致
+                directMessageGuildMap.set(addGuildPrefix(dmData.author.id), dmData.guild_id)
               }
             }
 
@@ -618,18 +631,19 @@ export function createQQBotBot(
       //   selfRole: GET /v2/groups/{group_openid}/members/{member_openid}
       //   返回: { member_openid, join_type, role }
       // - 频道+子频道: GET /guilds/{guild_id} + GET /channels/{channel_id}
-      //   返回: gid="频道id-子频道id", name="频道名-子频道名", avatar=频道icon, memberCount=频道member_count, maxMemberCount=频道max_members, owner=频道owner_id
+      //   返回: gid="qg_频道id-子频道id"（qg_ 前缀防止丢精度，兼容无前缀格式）, name="频道名-子频道名", avatar=频道icon, memberCount=频道member_count, maxMemberCount=频道max_members, owner=频道owner_id
       //   selfRole: GET /guilds/{guild_id}/members/{user_id}
       //   返回: roles 数组，4=owner, 2=admin, 1=member
 
       // 判断 ID 类型：
       // - 群聊 ID (group_openid): 32位大写十六进制字符串
-      // - 频道+子频道: "guild_id-channel_id" 格式（如 "123456-789012"）
+      // - 频道+子频道: "qg_guild_id-channel_id" 格式（如 "qg_123456-789012"）
       // - 注意：不支持单独的频道 ID，必须是组合格式
 
       // 检查是否是 "频道号-子频道号" 格式
-      if (gid.includes("-")) {
-        const [guildId, channelId] = gid.split("-")
+      const plainGid = stripGuildPrefix(gid)
+      if (plainGid.includes("-")) {
+        const [guildId, channelId] = plainGid.split("-")
         try {
           const [guildInfo, channelInfo] = await Promise.all([
             api.getGuildInfo(guildId),
@@ -644,7 +658,7 @@ export function createQQBotBot(
             // 查询失败时不设置 selfRole
           }
           return {
-            gid: `${guildId}-${channelId}`,
+            gid: addGuildPrefix(`${guildId}-${channelId}`),
             name: `${guildInfo.name}-${channelInfo.name}`,
             avatar: guildInfo.icon,
             memberCount: guildInfo.member_count,
@@ -708,15 +722,16 @@ export function createQQBotBot(
 
       // 通过 ID 格式判断是群聊还是频道
       // 群聊 ID (group_openid): 32位大写十六进制字符串
-      // 频道 ID (guild_id): 数字字符串
-      const isGuild = /^\d+$/.test(gid)
+      // 频道 ID: qg_ 前缀、数字或「频道号-子频道」组合格式
+      const plainGid = stripGuildPrefix(gid)
+      const isGuild = plainGid.includes("-") || /^\d+$/.test(plainGid)
 
       if (isGuild) {
         // 频道 API
         try {
-          const memberInfo = await api.getGuildMemberInfo(gid, uid)
+          const memberInfo = await api.getGuildMemberInfo(plainGuildId(gid), stripGuildPrefix(uid))
           return {
-            uid: memberInfo.user.id,
+            uid: addGuildPrefix(memberInfo.user.id),
             gid,
             name: memberInfo.user.username,
             avatar: memberInfo.user.avatar,
@@ -751,15 +766,16 @@ export function createQQBotBot(
 
       // 通过 ID 格式判断是群聊还是频道
       // 群聊 ID (group_openid): 32位大写十六进制字符串
-      // 频道 ID (guild_id): 数字字符串
-      const isGuild = /^\d+$/.test(gid)
+      // 频道 ID: qg_ 前缀、数字或「频道号-子频道」组合格式
+      const plainGid = stripGuildPrefix(gid)
+      const isGuild = plainGid.includes("-") || /^\d+$/.test(plainGid)
 
       if (isGuild) {
         // 频道 API
         try {
-          const members = await api.getGuildMemberListInfo(gid)
+          const members = await api.getGuildMemberListInfo(plainGuildId(gid))
           return members.map((m) => ({
-            uid: m.user.id,
+            uid: addGuildPrefix(m.user.id),
             gid,
             name: m.user.username,
             avatar: m.user.avatar,
@@ -802,7 +818,7 @@ export function createQQBotBot(
         await api.muteGroupMember(gid, uid, expireAt)
       } else {
         // 频道：PATCH /guilds/{guild_id}/members/{user_id}/mute
-        await api.muteGuildMember(gid, uid, seconds)
+        await api.muteGuildMember(plainGuildId(gid), stripGuildPrefix(uid), seconds)
       }
     },
 
@@ -822,7 +838,7 @@ export function createQQBotBot(
         await api.kickGroupMember(gid, [uid], rejectAddAgain)
       } else {
         // 频道：DELETE /guilds/{guild_id}/members/{user_id}
-        await api.kickGuildMember(gid, uid, rejectAddAgain)
+        await api.kickGuildMember(plainGuildId(gid), stripGuildPrefix(uid), rejectAddAgain)
       }
     },
 
@@ -881,6 +897,13 @@ export function createQQBotBot(
     },
 
     callApi<T>(action: string, params?: Record<string, unknown>): Promise<T> {
+      // 互动回调应答（按钮点击）：PUT /interactions/{interaction_id}
+      if (action === "replyInteraction") {
+        return api.replyInteraction(
+          String(params?.interactionId ?? params?.interaction_id ?? ""),
+          Number(params?.code ?? 0)
+        ) as Promise<T>
+      }
       return api.call(action, params as any)
     }
   }

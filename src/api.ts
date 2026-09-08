@@ -213,6 +213,15 @@ export class ApiClient {
     await this.call("POST", `/v2/groups/${groupOpenId}/approval_join_request/${memberOpenId}`, body)
   }
 
+  /**
+   * 应答互动回调（按钮点击）
+   * @param interactionId INTERACTION_CREATE 事件的 id
+   * @param code 应答码：0 成功；1 操作失败；2 操作频繁；3 重复操作；4 没有权限；5 仅管理员可操作
+   */
+  async replyInteraction(interactionId: string, code = 0): Promise<void> {
+    await this.call("PUT", `/interactions/${interactionId}`, { code })
+  }
+
   /** 上传群聊富媒体 */
   async uploadGroupMedia(
     groupOpenId: string,

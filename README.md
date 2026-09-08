@@ -41,7 +41,6 @@ pnpm run build
 | 连接方式 | `WebSocket Gateway` 或 `Webhook 回调` | WebSocket Gateway |
 | AppID | QQ 开放平台分配的机器人 AppID | 必填 |
 | AppSecret | QQ 开放平台分配的机器人密钥 | 必填 |
-| Access Token | 预配置的 Access Token，留空则自动获取 | 留空 |
 | 机器人 QQ 号 | 机器人的真实 QQ 号，用于日志显示 | 留空 |
 | 事件订阅 | 预设订阅模式（见下方说明） | 群聊 |
 | 分片配置 | 格式：`分片ID/分片总数`，如 `0/1` | 0/1 |
@@ -122,6 +121,8 @@ export default async function upload(data, options) {
 | 频道私域 + 群聊 | 私域频道 + 群聊 | 同时接入频道和群 |
 
 > **注意**：频道公域和私域不能同时订阅，这是 QQ 开放平台的限制。
+
+各订阅预设可接收的事件清单、内核事件模型的完成度对照见 [docs/EVENTS.md](docs/EVENTS.md)。
 
 ### 沙箱模式
 

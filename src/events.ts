@@ -7,8 +7,8 @@
  *   - 需区分群消息、私聊消息、频道消息和频道私信
  *   - 部分事件（如 FRIEND_ADD）需要特殊处理
  */
-import type { IncomingEvent, IncomingMessageEvent, UserInfo, MemberInfo } from "@yunzai-ng/types"
-import { decodeMessage } from "./codec.js"
+import type { IncomingEvent, IncomingMessageEvent, IncomingRequestEvent, UserInfo, MemberInfo } from "@yunzai-ng/types"
+import { decodeMessage, addGuildPrefix } from "./codec.js"
 import type { GroupMessageEvent, C2CMessageEvent, GuildMessageEvent, DirectMessageEvent } from "./types.js"
 
 /**
@@ -22,6 +22,7 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
   switch (eventType) {
     // ── 消息事件 ──
     case "GROUP_AT_MESSAGE_CREATE":
+    case "GROUP_MESSAGE_CREATE":
       return decodeGroupMessage(data as GroupMessageEvent)
     case "C2C_MESSAGE_CREATE":
       return decodeC2CMessage(data as C2CMessageEvent)
@@ -43,45 +44,55 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
 
     // ── 群事件 ──
     case "GROUP_ADD_ROBOT":
-      return notice("group.increase", { gid: payload.group_openid, uid: payload.op_member_openid, way: "invite", time: parseTimestamp(payload.timestamp) }, payload)
+      return notice("group.robot.add", { gid: payload.group_openid, uid: payload.op_member_openid, time: parseTimestamp(payload.timestamp) }, payload)
     case "GROUP_DEL_ROBOT":
-      return notice("group.decrease", { gid: payload.group_openid, uid: payload.op_member_openid, way: "kick", time: parseTimestamp(payload.timestamp) }, payload)
+      return notice("group.robot.del", { gid: payload.group_openid, uid: payload.op_member_openid, time: parseTimestamp(payload.timestamp) }, payload)
     case "GROUP_MSG_REJECT":
       return notice("group.msgReject", { gid: payload.group_openid, time: parseTimestamp(payload.timestamp) }, payload)
     case "GROUP_MSG_RECEIVE":
       return notice("group.msgReceive", { gid: payload.group_openid, time: parseTimestamp(payload.timestamp) }, payload)
     case "GROUP_MEMBER_ADD":
-      return notice("group.member.increase", {
+      return {
+        kind: "notice",
+        noticeType: "group.increase",
         gid: payload.group_openid ?? payload.group_id,
         uid: payload.member_openid ?? payload.user_openid ?? payload.user_id,
         operatorId: payload.op_member_openid ?? payload.operator_id,
-        time: parseTimestamp(payload.timestamp)
-      }, payload)
+        way: "other",
+        time: parseTimestamp(payload.timestamp),
+        raw: payload
+      }
     case "GROUP_MEMBER_REMOVE":
-      return notice("group.member.decrease", {
+      return {
+        kind: "notice",
+        noticeType: "group.decrease",
         gid: payload.group_openid ?? payload.group_id,
         uid: payload.member_openid ?? payload.user_openid ?? payload.user_id,
         operatorId: payload.op_member_openid ?? payload.operator_id,
-        time: parseTimestamp(payload.timestamp)
-      }, payload)
+        way: "other",
+        time: parseTimestamp(payload.timestamp),
+        raw: payload
+      }
+    case "GROUP_JOIN_REQUEST":
+      return decodeGroupJoinRequest(payload)
 
     // ── 频道事件 ──
     case "GUILD_CREATE":
       return notice("guild.increase", {
         gid: payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "GUILD_UPDATE":
       return notice("guild.update", {
         gid: payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "GUILD_DELETE":
       return notice("guild.decrease", {
         gid: payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
 
@@ -90,21 +101,21 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
       return notice("channel.increase", {
         gid: payload.guild_id,
         channelId: payload.channel_id || payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "CHANNEL_UPDATE":
       return notice("channel.update", {
         gid: payload.guild_id,
         channelId: payload.channel_id || payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "CHANNEL_DELETE":
       return notice("channel.decrease", {
         gid: payload.guild_id,
         channelId: payload.channel_id || payload.id,
-        operatorId: payload.op_user_id,
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
 
@@ -112,22 +123,22 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
     case "GUILD_MEMBER_ADD":
       return notice("guild.member.increase", {
         gid: payload.guild_id,
-        uid: payload.user?.id,
-        operatorId: payload.op_user_id,
+        uid: addGuildPrefix(payload.user?.id),
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "GUILD_MEMBER_UPDATE":
       return notice("guild.member.update", {
         gid: payload.guild_id,
-        uid: payload.user?.id,
-        operatorId: payload.op_user_id,
+        uid: addGuildPrefix(payload.user?.id),
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
     case "GUILD_MEMBER_REMOVE":
       return notice("guild.member.decrease", {
         gid: payload.guild_id,
-        uid: payload.user?.id,
-        operatorId: payload.op_user_id,
+        uid: addGuildPrefix(payload.user?.id),
+        operatorId: addGuildPrefix(payload.op_user_id),
         time: parseTimestamp(payload.joined_at)
       }, payload)
 
@@ -136,7 +147,7 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
       return notice("reaction.add", {
         gid: payload.guild_id,
         channelId: payload.channel_id,
-        uid: payload.user_id,
+        uid: addGuildPrefix(payload.user_id),
         messageId: payload.target?.id,
         emoji: payload.emoji,
         time: Date.now()
@@ -145,7 +156,7 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
       return notice("reaction.remove", {
         gid: payload.guild_id,
         channelId: payload.channel_id,
-        uid: payload.user_id,
+        uid: addGuildPrefix(payload.user_id),
         messageId: payload.target?.id,
         emoji: payload.emoji,
         time: Date.now()
@@ -195,15 +206,49 @@ export function decodeEvent(eventType: string, data: unknown): IncomingEvent | u
     case "FORUM_PUBLISH_AUDIT_RESULT":
       return decodeForumAudit(payload)
 
+    // ── 公域论坛事件（字段较私域精简） ──
+    case "OPEN_FORUM_THREAD_CREATE":
+      return decodeOpenForumEvent("open_forum.thread.create", payload)
+    case "OPEN_FORUM_THREAD_UPDATE":
+      return decodeOpenForumEvent("open_forum.thread.update", payload)
+    case "OPEN_FORUM_THREAD_DELETE":
+      return decodeOpenForumEvent("open_forum.thread.delete", payload)
+    case "OPEN_FORUM_POST_CREATE":
+      return decodeOpenForumEvent("open_forum.post.create", payload)
+    case "OPEN_FORUM_POST_DELETE":
+      return decodeOpenForumEvent("open_forum.post.delete", payload)
+    case "OPEN_FORUM_REPLY_CREATE":
+      return decodeOpenForumEvent("open_forum.reply.create", payload)
+    case "OPEN_FORUM_REPLY_DELETE":
+      return decodeOpenForumEvent("open_forum.reply.delete", payload)
+
     // ── 音频事件 ──
     case "AUDIO_START":
       return notice("audio.start", { gid: payload.guild_id, channelId: payload.channel_id, time: Date.now() }, payload)
     case "AUDIO_FINISH":
       return notice("audio.finish", { gid: payload.guild_id, channelId: payload.channel_id, time: Date.now() }, payload)
     case "AUDIO_ON_MIC":
-      return notice("audio.onMic", { gid: payload.guild_id, channelId: payload.channel_id, uid: payload.user_id, time: Date.now() }, payload)
+      return notice("audio.onMic", { gid: payload.guild_id, channelId: payload.channel_id, uid: addGuildPrefix(payload.user_id), time: Date.now() }, payload)
     case "AUDIO_OFF_MIC":
-      return notice("audio.offMic", { gid: payload.guild_id, channelId: payload.channel_id, uid: payload.user_id, time: Date.now() }, payload)
+      return notice("audio.offMic", { gid: payload.guild_id, channelId: payload.channel_id, uid: addGuildPrefix(payload.user_id), time: Date.now() }, payload)
+
+    // ── 音视频/直播子频道成员进出 ──
+    case "AUDIO_OR_LIVE_CHANNEL_MEMBER_ENTER":
+      return notice("channel.member.enter", {
+        gid: payload.guild_id,
+        channelId: payload.channel_id,
+        channelType: payload.channel_type,
+        uid: addGuildPrefix(payload.user_id),
+        time: Date.now()
+      }, payload)
+    case "AUDIO_OR_LIVE_CHANNEL_MEMBER_EXIT":
+      return notice("channel.member.exit", {
+        gid: payload.guild_id,
+        channelId: payload.channel_id,
+        channelType: payload.channel_type,
+        uid: addGuildPrefix(payload.user_id),
+        time: Date.now()
+      }, payload)
 
     default:
       // 未知事件降级为 GenericNotice
@@ -260,6 +305,7 @@ function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
   return {
     kind: "message",
     scene: "private",
+    subType: "friend",
     messageId: data.id,
     message,
     sender: {
@@ -273,14 +319,15 @@ function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
 }
 
 function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments)
+  const message = decodeMessage(data.content, data.attachments, true)
   return {
     kind: "message",
     scene: "guild",
     messageId: data.id,
+    seq: data.seq_in_channel ? Number(data.seq_in_channel) : undefined,
     message,
     sender: {
-      uid: data.author.id,
+      uid: addGuildPrefix(data.author.id),
       name: data.author.username,
       avatar: data.author.avatar,
       role: data.author.member_role || "member"
@@ -288,7 +335,7 @@ function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
     channel: {
       channelId: data.channel_id,
       guildId: data.guild_id,
-      name: `${data.guild_id}-${data.channel_id}`
+      name: addGuildPrefix(`${data.guild_id}-${data.channel_id}`)
     },
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
@@ -296,7 +343,7 @@ function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
 }
 
 function decodeDirectMessage(data: DirectMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments)
+  const message = decodeMessage(data.content, data.attachments, true)
   return {
     kind: "message",
     scene: "private",
@@ -304,7 +351,7 @@ function decodeDirectMessage(data: DirectMessageEvent): IncomingMessageEvent {
     messageId: data.id,
     message,
     sender: {
-      uid: data.author.id,
+      uid: addGuildPrefix(data.author.id),
       name: data.author.username,
       avatar: data.author.avatar
     } as UserInfo,
@@ -326,7 +373,7 @@ function decodeInteraction(payload: Record<string, any>): IncomingEvent {
     return notice("group.action", { ...base, gid: payload.group_openid, uid: payload.group_member_openid, data: payload.data, noticeId: payload.id }, payload)
   }
   if (scene === "guild") {
-    return notice("guild.action", { ...base, gid: payload.guild_id, channelId: payload.channel_id, uid: payload.data?.resolved?.user_id, data: payload.data, noticeId: payload.id }, payload)
+    return notice("guild.action", { ...base, gid: payload.guild_id, channelId: payload.channel_id, uid: addGuildPrefix(payload.data?.resolved?.user_id), data: payload.data, noticeId: payload.id }, payload)
   }
   return notice("interaction", { ...base, data: payload.data, noticeId: payload.id }, payload)
 }
@@ -359,7 +406,7 @@ function decodeForumEvent(subType: string, payload: Record<string, any>): Incomi
   const data: Record<string, unknown> = {
     gid: payload.guild_id,
     channelId: payload.channel_id,
-    uid: payload.author_id
+    uid: addGuildPrefix(payload.author_id)
   }
   // 提取具体内容信息
   if (payload.thread_info) {
@@ -386,7 +433,7 @@ function decodeForumAudit(payload: Record<string, any>): IncomingEvent {
   return notice("forum.audit", {
     gid: payload.guild_id,
     channelId: payload.channel_id,
-    uid: payload.author_id,
+    uid: addGuildPrefix(payload.author_id),
     threadId: payload.thread_id,
     postId: payload.post_id,
     replyId: payload.reply_id,
@@ -394,4 +441,34 @@ function decodeForumAudit(payload: Record<string, any>): IncomingEvent {
     result: payload.result,
     message: payload.err_msg
   }, payload)
+}
+
+// ── 公域论坛事件解析 ──
+
+function decodeOpenForumEvent(subType: string, payload: Record<string, any>): IncomingEvent {
+  return notice(subType, {
+    gid: payload.guild_id,
+    channelId: payload.channel_id,
+    uid: addGuildPrefix(payload.author_id),
+    time: parseTimestamp(payload.timestamp)
+  }, payload)
+}
+
+// ── 入群申请事件解析 ──
+
+function decodeGroupJoinRequest(payload: Record<string, any>): IncomingRequestEvent {
+  const invited = payload.invited_by != null || payload.apply_source === "invited"
+  const comment = typeof payload.verify_info === "string"
+    ? payload.verify_info
+    : payload.verify_info?.verify_message
+  return {
+    kind: "request",
+    requestType: invited ? "group.invite" : "group.add",
+    uid: payload.member_openid,
+    gid: payload.group_openid,
+    comment,
+    flag: `${payload.group_openid}:${payload.member_openid}:${payload.join_request_id ?? ""}`,
+    time: parseTimestamp(payload.apply_at ?? payload.timestamp),
+    raw: payload
+  }
 }

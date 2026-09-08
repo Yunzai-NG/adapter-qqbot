@@ -25,6 +25,23 @@ export interface QQBotSegment {
 export const PLATFORM = "qqbot"
 
 /**
+ * 频道场景 ID 前缀。
+ * QQ 频道的用户 id 与「频道号-子频道」组合 id 都是超出 JS 安全整数范围的纯数字，
+ * 下游一旦按数字解析就会丢精度；加前缀使其不再是合法数字，把错误暴露在转换处。
+ */
+export const GUILD_PREFIX = "qg_"
+
+/** 给频道场景 ID 加前缀；空值（空串 / undefined）原样返回 */
+export function addGuildPrefix<T extends string | undefined>(id: T): T {
+  return (id ? `${GUILD_PREFIX}${id}` : id) as T
+}
+
+/** 去掉频道场景 ID 前缀，还原为 API 所需的裸 ID */
+export function stripGuildPrefix(id: string): string {
+  return id.startsWith(GUILD_PREFIX) ? id.slice(GUILD_PREFIX.length) : id
+}
+
+/**
  * 编码单个消息段
  * @param segment 通用消息段
  * @returns QQ Bot 消息段；无法表达时 undefined
@@ -86,7 +103,8 @@ export function encodeSegments(segments: readonly Segment[]): {
         break
 
       case "at":
-        content += `<@${encoded.data.uid}>`
+        // 频道场景的 at 段 uid 带 qg_ 前缀，还原为裸 id 再拼 <@>
+        content += `<@${stripGuildPrefix(encoded.data.uid as string)}>`
         break
 
       case "atAll":
@@ -117,11 +135,13 @@ export function encodeSegments(segments: readonly Segment[]): {
  * 解码 QQ Bot 消息
  * @param content 消息内容
  * @param attachments 附件列表
+ * @param guildScope 频道场景；@提及的用户 id 加 qg_ 前缀
  * @returns 通用消息段数组
  */
 export function decodeMessage(
   content: string,
-  attachments?: Array<{ content_type: string; url: string; filename: string }>
+  attachments?: Array<{ content_type: string; url: string; filename: string }>,
+  guildScope = false
 ): Segment[] {
   const segments: Segment[] = []
 
@@ -139,7 +159,7 @@ export function decodeMessage(
     if (uid === "everyone") {
       segments.push({ type: "atAll" })
     } else {
-      segments.push({ type: "at", uid })
+      segments.push({ type: "at", uid: guildScope ? addGuildPrefix(uid) : uid })
     }
 
     lastIndex = match.index + match[0].length

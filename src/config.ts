@@ -28,12 +28,12 @@ export const PRESET_INTENTS: Record<string, number> = {
   guild_public: (1 << 30) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29),
   // 频道私域：GUILD_MESSAGES(9) + GUILDS(0) + GUILD_MEMBERS(1) + GUILD_MESSAGE_REACTIONS(10) + DIRECT_MESSAGE(12) + AUDIO_ACTION(29) + FORUMS_EVENT(28)
   guild_private: (1 << 9) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29) | (1 << 28),
-  // 群聊：GROUP_AND_C2C_EVENT(25)
-  group: 1 << 25,
+  // 群聊：GROUP_AND_C2C_EVENT(25) + GROUP_MEMBER(24)
+  group: (1 << 25) | (1 << 24),
   // 频道公域 + 群聊
-  guild_public_group: (1 << 30) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29) | (1 << 25),
+  guild_public_group: (1 << 30) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29) | (1 << 25) | (1 << 24),
   // 频道私域 + 群聊
-  guild_private_group: (1 << 9) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29) | (1 << 28) | (1 << 25),
+  guild_private_group: (1 << 9) | (1 << 0) | (1 << 1) | (1 << 10) | (1 << 12) | (1 << 29) | (1 << 28) | (1 << 25) | (1 << 24),
   // 附加：INTERACTION(26) + MESSAGE_AUDIT(27)
   all: (1 << 26) | (1 << 27)
 }
@@ -72,13 +72,6 @@ export const ACCOUNT_SCHEMA = s.object({
     .desc("QQ 开放平台分配的机器人密钥，用于获取 Access Token 和签名验证")
     .order(3),
 
-  token: s
-    .password()
-    .default("")
-    .title("Access Token（可选）")
-    .desc("预配置的 Access Token。留空则自动通过 AppID + AppSecret 获取")
-    .order(4),
-
   robotUin: s
     .string()
     .default("")
@@ -114,14 +107,14 @@ export const ACCOUNT_SCHEMA = s.object({
     .boolean()
     .default(false)
     .title("频道 Markdown")
-    .desc("启用后频道消息将使用 Markdown 格式发送（需在 QQ 开放平台配置模板）")
+    .desc("启用后频道消息将使用 Markdown 格式发送（需要原生md权限，暂不支持模板md）")
     .order(13),
 
   groupMarkdown: s
     .boolean()
     .default(false)
     .title("群聊 Markdown")
-    .desc("启用后群聊消息将使用 Markdown 格式发送（需在 QQ 开放平台配置模板）")
+    .desc("启用后群聊消息将使用 Markdown 格式发送（需要原生md权限，暂不支持模板md）")
     .order(14),
 
   imageHostScript: s
@@ -164,10 +157,10 @@ export function validateAccount(input: unknown): QQBotAccount {
     issues.push({ path: "appId", message: "AppID 不能为空", severity: "error" })
   }
 
-  if (!account.appSecret.trim() && !account.token.trim()) {
+  if (!account.appSecret.trim()) {
     issues.push({
       path: "appSecret",
-      message: "AppSecret 和 Access Token 至少需要填写一项",
+      message: "AppSecret 不能为空",
       severity: "error"
     })
   }
@@ -208,8 +201,7 @@ export function validateAccount(input: unknown): QQBotAccount {
   const result = {
     ...account,
     appId: account.appId.trim(),
-    appSecret: account.appSecret.trim(),
-    token: account.token.trim()
+    appSecret: account.appSecret.trim()
   } as Record<string, unknown>
 
   // 根据预设订阅计算 intents 值

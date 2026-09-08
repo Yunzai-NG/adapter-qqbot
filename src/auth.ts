@@ -37,10 +37,6 @@ export class TokenManager {
    *
    */
   async getToken(): Promise<string> {
-    if (this.account.token) {
-      return this.account.token
-    }
-
     // 内存缓存有效
     if (this.token && Date.now() < this.expiresAt - 60 * 1000) {
       return this.token
