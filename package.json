@@ -42,6 +42,11 @@
     "tweetnacl": "^1.0.3",
     "ws": "8.21.3"
   },
+  "optionalDependencies": {
+    "qrcode": "^1.5.4",
+    "sharp": "^0.33.5",
+    "silk-wasm": "^3.6.1"
+  },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "@types/node": "^22.20.1",

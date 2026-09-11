@@ -15,7 +15,11 @@ import jsdoc from "eslint-plugin-jsdoc"
  */
 export default [
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/*.d.ts"]
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/*.d.ts"
+    ]
   },
   js.configs.recommended,
   {
@@ -88,12 +92,12 @@ export default [
             FunctionDeclaration: true,
             MethodDefinition: true
           },
+          // 只要求「声明级」符号（接口 / 类型别名 / 枚举）带文档；
+          // 接口内部的字段签名不强制，避免满屏空 /** */ 噪音。
           contexts: [
             "TSInterfaceDeclaration",
             "TSTypeAliasDeclaration",
-            "TSEnumDeclaration",
-            "TSPropertySignature",
-            "TSMethodSignature"
+            "TSEnumDeclaration"
           ]
         }
       ],

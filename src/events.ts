@@ -292,9 +292,10 @@ function decodeGroupMessage(data: GroupMessageEvent): IncomingMessageEvent {
       gid: data.group_openid,
       name: data.author.username,
       avatar: data.author.avatar,
-      role: "member"
+      role: data.author.role || "member"
     } as MemberInfo,
     group: { gid: data.group_openid },
+    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -313,6 +314,7 @@ function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
       name: data.author.username,
       avatar: data.author.avatar
     } as UserInfo,
+    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -337,6 +339,7 @@ function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
       guildId: data.guild_id,
       name: addGuildPrefix(`${data.guild_id}-${data.channel_id}`)
     },
+    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -356,6 +359,7 @@ function decodeDirectMessage(data: DirectMessageEvent): IncomingMessageEvent {
       avatar: data.author.avatar
     } as UserInfo,
     channel: { channelId: data.channel_id, guildId: data.guild_id },
+    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }

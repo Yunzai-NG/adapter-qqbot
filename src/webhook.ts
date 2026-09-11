@@ -15,18 +15,8 @@ import type { WSPayload } from "./types.js"
 
 /** Webhook 处理器注册信息 */
 export interface WebhookHandlerInfo {
-  /**
-   *
-   */
   handler: (appId: string, packet: WSPayload) => void
-  /**
-   *
-   */
   ed25519: Ed25519
-  /**
-   *
-   */
-  logger?: { debug: (msg: string) => void }
 }
 
 /** 创建 webhook 路由处理器 */

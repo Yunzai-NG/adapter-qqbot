@@ -14,6 +14,10 @@ import type {
   SendMessageResponse,
   UploadMediaRequest,
   UploadMediaResponse,
+  UploadPrepareRequest,
+  UploadPrepareResponse,
+  UploadPartFinishRequest,
+  FilesRequest,
   CreateDirectSessionRequest,
   CreateDirectSessionResponse,
   QQBotSelfInfo,
@@ -29,9 +33,7 @@ import type {
 
 /** API 错误 */
 export class QQBotApiError extends Error {
-  /**
-   *
-   */
+  /** @param code QQ 平台错误码，无错误体时退化为 HTTP 状态码 */
   constructor(
     message: string,
     public code: number,
@@ -42,11 +44,40 @@ export class QQBotApiError extends Error {
   }
 }
 
+/** 非 2xx 响应时抛出 QQBotApiError */
+function throwIfError(status: number, data: unknown): void {
+  if (status < 200 || status >= 300) {
+    const errorData = data as QQBotError | undefined
+    throw new QQBotApiError(
+      errorData?.message || `API 调用失败：HTTP ${status}`,
+      errorData?.code || status,
+      errorData?.data
+    )
+  }
+}
+
+/** 审核中的消息没有常规消息 id，统一为可追踪的待审核结果。 */
+function normalizeSendResponse(data: unknown): SendMessageResponse {
+  const result = data as Partial<SendMessageResponse> & {
+    message_audit?: { audit_id?: string }
+  }
+  if (result.message_audit?.audit_id) {
+    return {
+      id: result.message_audit.audit_id,
+      timestamp: new Date().toISOString(),
+      auditStatus: "pending",
+      raw: data
+    }
+  }
+  if (!result.id || !result.timestamp) {
+    throw new QQBotApiError("发送消息响应缺少 id 或 timestamp", 0, data)
+  }
+  return result as SendMessageResponse
+}
+
 /** API 客户端 */
 export class ApiClient {
-  /**
-   *
-   */
+  /** @param tokenManager 提供 API 基址与 Authorization 头 */
   constructor(
     private tokenManager: TokenManager,
     private http: HttpClient,
@@ -69,15 +100,7 @@ export class ApiClient {
       throwOnError: false
     })
 
-    if (response.status < 200 || response.status >= 300) {
-      const errorData = response.data as QQBotError | undefined
-      throw new QQBotApiError(
-        errorData?.message || `API 调用失败：HTTP ${response.status}`,
-        errorData?.code || response.status,
-        errorData?.data
-      )
-    }
-
+    throwIfError(response.status, response.data)
     return response.data
   }
 
@@ -86,11 +109,11 @@ export class ApiClient {
     groupOpenId: string,
     request: SendMessageRequest
   ): Promise<SendMessageResponse> {
-    return this.call<SendMessageResponse>(
+    return normalizeSendResponse(await this.call(
       "POST",
       `/v2/groups/${groupOpenId}/messages`,
       request
-    )
+    ))
   }
 
   /** 发送私聊消息 */
@@ -98,10 +121,32 @@ export class ApiClient {
     openId: string,
     request: SendMessageRequest
   ): Promise<SendMessageResponse> {
-    return this.call<SendMessageResponse>(
+    return normalizeSendResponse(await this.call(
       "POST",
       `/v2/users/${openId}/messages`,
       request
+    ))
+  }
+
+  /** 获取机器人已加入的频道；after 为分页游标。 */
+  async getGuildList(after?: string): Promise<GuildInfo[]> {
+    const path = after
+      ? `/users/@me/guilds?after=${encodeURIComponent(after)}`
+      : "/users/@me/guilds"
+    return this.call<GuildInfo[]>("GET", path)
+  }
+
+  /** 添加或移除频道消息表态。 */
+  async setGuildMessageReaction(
+    channelId: string,
+    messageId: string,
+    emojiId: string,
+    add: boolean
+  ): Promise<void> {
+    const type = /^\d+$/.test(emojiId) ? 1 : 2
+    await this.call(
+      add ? "PUT" : "DELETE",
+      `/channels/${channelId}/messages/${messageId}/reactions/${type}/${encodeURIComponent(emojiId)}`
     )
   }
 
@@ -246,16 +291,132 @@ export class ApiClient {
     )
   }
 
+  /**
+   * 富媒体分片预上传：换取 upload_id 与各分片的预签名 URL
+   * @param target 上传目标类型：group=群聊，user=单聊
+   * @param targetId 群 openid 或用户 openid
+   * @param request 文件大小与摘要信息
+   * @returns upload_id、分片列表与并发重试配置
+   */
+  async prepareUpload(
+    target: "group" | "user",
+    targetId: string,
+    request: UploadPrepareRequest
+  ): Promise<UploadPrepareResponse> {
+    return this.call<UploadPrepareResponse>(
+      "POST",
+      `/v2/${target}s/${targetId}/upload_prepare`,
+      request
+    )
+  }
+
+  /**
+   * 通知服务端某个分片已 PUT 完成
+   * @param target 上传目标类型：group=群聊，user=单聊
+   * @param targetId 群 openid 或用户 openid
+   * @param request 分片序号、大小与 md5
+   */
+  async finishUploadPart(
+    target: "group" | "user",
+    targetId: string,
+    request: UploadPartFinishRequest
+  ): Promise<void> {
+    await this.call(
+      "POST",
+      `/v2/${target}s/${targetId}/upload_part_finish`,
+      request
+    )
+  }
+
+  /**
+   * files 接口：URL 转存（带 url）或合并分片（带 upload_id），换取 file_info
+   * @param target 上传目标类型：group=群聊，user=单聊
+   * @param targetId 群 openid 或用户 openid
+   * @param request 转存 URL 或待合并的 upload_id
+   * @returns 含 file_info 的上传结果
+   */
+  async commitFile(
+    target: "group" | "user",
+    targetId: string,
+    request: FilesRequest
+  ): Promise<UploadMediaResponse> {
+    return this.call<UploadMediaResponse>(
+      "POST",
+      `/v2/${target}s/${targetId}/files`,
+      request
+    )
+  }
+
   /** 发送频道消息 */
   async sendGuildMessage(
     channelId: string,
     request: SendMessageRequest
   ): Promise<SendMessageResponse> {
-    return this.call<SendMessageResponse>(
+    return normalizeSendResponse(await this.call(
       "POST",
       `/channels/${channelId}/messages`,
       request
-    )
+    ))
+  }
+
+  /**
+   * 以 multipart/form-data 发送带图片的消息（频道消息 / 频道私信共用）
+   * @param path 消息接口路径，如 `/channels/{id}/messages` 或 `/dms/{guildId}/messages`
+   * @param request 消息请求（取 content / msg_id / event_id 字段）
+   * @param imageBuffer 图片二进制
+   */
+  private async sendMultipart(
+    path: string,
+    request: SendMessageRequest,
+    imageBuffer: Buffer
+  ): Promise<SendMessageResponse> {
+    const url = `${this.tokenManager.getApiBase()}${path}`
+    const authHeaders = await this.tokenManager.getAuthHeader()
+
+    const boundary = "----YunzaiNGFormBoundary" + Math.random().toString(36).slice(2)
+    const field = (name: string, value: string): Buffer =>
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
+
+    const parts: Buffer[] = []
+    if (request.content !== undefined) parts.push(field("content", request.content))
+    if (request.msg_type !== undefined) parts.push(field("msg_type", String(request.msg_type)))
+    if (request.msg_seq !== undefined) parts.push(field("msg_seq", String(request.msg_seq)))
+    if (request.msg_id) parts.push(field("msg_id", request.msg_id))
+    if (request.event_id) parts.push(field("event_id", request.event_id))
+    if (request.message_reference) {
+      parts.push(field("message_reference", JSON.stringify(request.message_reference)))
+    }
+    if (request.markdown) parts.push(field("markdown", JSON.stringify(request.markdown)))
+    if (request.keyboard) parts.push(field("keyboard", JSON.stringify(request.keyboard)))
+    if (request.ark) parts.push(field("ark", JSON.stringify(request.ark)))
+    if (request.embed) parts.push(field("embed", JSON.stringify(request.embed)))
+
+    // 图片文件段
+    parts.push(Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="file_image"; filename="image.png"\r\n` +
+      `Content-Type: image/png\r\n\r\n`
+    ))
+    parts.push(imageBuffer)
+    parts.push(Buffer.from("\r\n"))
+    parts.push(Buffer.from(`--${boundary}--\r\n`))
+
+    const body = Buffer.concat(parts)
+
+    const response = await this.http.request<unknown>(url, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": String(body.length)
+      },
+      body,
+      responseType: "json",
+      throwOnError: false
+    })
+
+    throwIfError(response.status, response.data)
+    return normalizeSendResponse(response.data)
   }
 
   /** 发送频道消息（带图片，multipart/form-data） */
@@ -264,74 +425,7 @@ export class ApiClient {
     request: SendMessageRequest,
     imageBuffer: Buffer
   ): Promise<SendMessageResponse> {
-    const url = `${this.tokenManager.getApiBase()}/channels/${channelId}/messages`
-    const authHeaders = await this.tokenManager.getAuthHeader()
-
-    // 手动构建 multipart/form-data
-    const boundary = "----YunzaiNGFormBoundary" + Math.random().toString(36).slice(2)
-    const parts: Buffer[] = []
-
-    // 添加文本内容
-    if (request.content) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="content"\r\n\r\n` +
-        `${request.content}\r\n`
-      ))
-    }
-
-    // 添加消息引用
-    if (request.msg_id) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="msg_id"\r\n\r\n` +
-        `${request.msg_id}\r\n`
-      ))
-    }
-    if (request.event_id) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="event_id"\r\n\r\n` +
-        `${request.event_id}\r\n`
-      ))
-    }
-
-    // 添加图片文件
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file_image"; filename="image.png"\r\n` +
-      `Content-Type: image/png\r\n\r\n`
-    ))
-    parts.push(imageBuffer)
-    parts.push(Buffer.from("\r\n"))
-
-    // 结束标记
-    parts.push(Buffer.from(`--${boundary}--\r\n`))
-
-    const body = Buffer.concat(parts)
-
-    const response = await this.http.request<SendMessageResponse>(url, {
-      method: "POST",
-      headers: {
-        ...authHeaders,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(body.length)
-      },
-      body,
-      responseType: "json",
-      throwOnError: false
-    })
-
-    if (response.status < 200 || response.status >= 300) {
-      const errorData = response.data as unknown as QQBotError | undefined
-      throw new QQBotApiError(
-        errorData?.message || `API 调用失败：HTTP ${response.status}`,
-        errorData?.code || response.status,
-        errorData?.data
-      )
-    }
-
-    return response.data
+    return this.sendMultipart(`/channels/${channelId}/messages`, request, imageBuffer)
   }
 
   /** 发送频道私信 */
@@ -339,11 +433,11 @@ export class ApiClient {
     guildId: string,
     request: SendMessageRequest
   ): Promise<SendMessageResponse> {
-    return this.call<SendMessageResponse>(
+    return normalizeSendResponse(await this.call(
       "POST",
       `/dms/${guildId}/messages`,
       request
-    )
+    ))
   }
 
   /** 发送频道私信（带图片，multipart/form-data） */
@@ -352,74 +446,7 @@ export class ApiClient {
     request: SendMessageRequest,
     imageBuffer: Buffer
   ): Promise<SendMessageResponse> {
-    const url = `${this.tokenManager.getApiBase()}/dms/${guildId}/messages`
-    const authHeaders = await this.tokenManager.getAuthHeader()
-
-    // 手动构建 multipart/form-data
-    const boundary = "----YunzaiNGFormBoundary" + Math.random().toString(36).slice(2)
-    const parts: Buffer[] = []
-
-    // 添加文本内容
-    if (request.content) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="content"\r\n\r\n` +
-        `${request.content}\r\n`
-      ))
-    }
-
-    // 添加消息引用
-    if (request.msg_id) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="msg_id"\r\n\r\n` +
-        `${request.msg_id}\r\n`
-      ))
-    }
-    if (request.event_id) {
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="event_id"\r\n\r\n` +
-        `${request.event_id}\r\n`
-      ))
-    }
-
-    // 添加图片文件
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="file_image"; filename="image.png"\r\n` +
-      `Content-Type: image/png\r\n\r\n`
-    ))
-    parts.push(imageBuffer)
-    parts.push(Buffer.from("\r\n"))
-
-    // 结束标记
-    parts.push(Buffer.from(`--${boundary}--\r\n`))
-
-    const body = Buffer.concat(parts)
-
-    const response = await this.http.request<SendMessageResponse>(url, {
-      method: "POST",
-      headers: {
-        ...authHeaders,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(body.length)
-      },
-      body,
-      responseType: "json",
-      throwOnError: false
-    })
-
-    if (response.status < 200 || response.status >= 300) {
-      const errorData = response.data as unknown as QQBotError | undefined
-      throw new QQBotApiError(
-        errorData?.message || `API 调用失败：HTTP ${response.status}`,
-        errorData?.code || response.status,
-        errorData?.data
-      )
-    }
-
-    return response.data
+    return this.sendMultipart(`/dms/${guildId}/messages`, request, imageBuffer)
   }
 
   /** 创建频道私信会话 */
@@ -446,104 +473,4 @@ export class ApiClient {
   async recallDirectMessage(guildId: string, messageId: string): Promise<void> {
     await this.call("DELETE", `/dms/${guildId}/messages/${messageId}`)
   }
-
-  // ── 以下为注释示例，待启用 ──
-
-  /**
-   * 获取频道详情
-   * API: GET /guilds/{guild_id}
-   * 返回: Guild 对象 { id, name, icon, owner_id, member_count, ... }
-   */
-  // async getGuildInfo(guildId: string): Promise<GuildInfo> {
-  //   return this.call<GuildInfo>("GET", `/guilds/${guildId}`)
-  // }
-
-  /**
-   * 获取用户频道列表
-   * API: GET /users/@me/guilds
-   * 参数: before?, after?, limit?
-   * 返回: Guild 对象数组
-   */
-  // async getUserGuilds(params?: { before?: string; after?: string; limit?: number }): Promise<GuildInfo[]> {
-  //   const query = params ? `?${new URLSearchParams(params as any).toString()}` : ""
-  //   return this.call<GuildInfo[]>("GET", `/users/@me/guilds${query}`)
-  // }
-
-  /**
-   * 获取频道成员详情
-   * API: GET /guilds/{guild_id}/members/{user_id}
-   * 返回: Member 对象 { user, nick, roles, joined_at }
-   */
-  // async getGuildMember(guildId: string, userId: string): Promise<GuildMember> {
-  //   return this.call<GuildMember>("GET", `/guilds/${guildId}/members/${userId}`)
-  // }
-
-  /**
-   * 获取频道成员列表
-   * API: GET /guilds/{guild_id}/members
-   * 参数: after?, limit?
-   * 返回: Member 对象数组
-   */
-  // async getGuildMembers(guildId: string, params?: { after?: string; limit?: number }): Promise<GuildMember[]> {
-  //   const query = params ? `?${new URLSearchParams(params as any).toString()}` : ""
-  //   return this.call<GuildMember[]>("GET", `/guilds/${guildId}/members${query}`)
-  // }
-
-  /**
-   * 删除频道成员（踢出）
-   * API: DELETE /guilds/{guild_id}/members/{user_id}
-   * 参数: add_blacklist? (是否加入黑名单)
-   * 返回: 204 No Content
-   */
-  // async kickGuildMember(guildId: string, userId: string, addBlacklist?: boolean): Promise<void> {
-  //   const body = addBlacklist ? { add_blacklist: true } : undefined
-  //   await this.call("DELETE", `/guilds/${guildId}/members/${userId}`, body)
-  // }
-
-  /**
-   * 机器人发表表情表态
-   * API: PUT /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
-   * 参数: type (1=系统表情, 2=emoji), id (表情 ID)
-   * 返回: 204 No Content
-   */
-  // async addReaction(channelId: string, messageId: string, type: number, emojiId: string): Promise<void> {
-  //   await this.call("PUT", `/channels/${channelId}/messages/${messageId}/reactions/${type}/${emojiId}`)
-  // }
-
-  /**
-   * 删除机器人发表的表情表态
-   * API: DELETE /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
-   * 返回: 204 No Content
-   */
-  // async removeReaction(channelId: string, messageId: string, type: number, emojiId: string): Promise<void> {
-  //   await this.call("DELETE", `/channels/${channelId}/messages/${messageId}/reactions/${type}/${emojiId}`)
-  // }
 }
-
-// ── 以下为注释示例的类型定义 ──
-
-/** 频道信息 */
-// interface GuildInfo {
-//   id: string
-//   name: string
-//   icon: string
-//   owner_id: string
-//   owner?: boolean
-//   joined_at: string
-//   member_count: number
-//   max_members: number
-//   description: string
-// }
-
-/** 频道成员 */
-// interface GuildMember {
-//   user: {
-//     id: string
-//     username: string
-//     avatar: string
-//     bot?: boolean
-//   }
-//   nick: string
-//   roles: string[]
-//   joined_at: string
-// }

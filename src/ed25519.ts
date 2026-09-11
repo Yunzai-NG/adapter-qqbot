@@ -22,9 +22,7 @@ export class Ed25519 {
   private secretKey: Uint8Array
   private publicKey: Uint8Array
 
-  /**
-   *
-   */
+  /** @param secret 机器人 AppSecret，作为密钥种子 */
   constructor(secret: string) {
     const keyPair = generateKeyPair(secret)
     this.secretKey = keyPair.secretKey

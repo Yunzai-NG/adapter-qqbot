@@ -13,26 +13,15 @@ import type { QQBotAccount } from "./config.js"
 import { createQQBotBot } from "./bot.js"
 import { PLATFORM } from "./codec.js"
 import { createWebhookHandler } from "./webhook.js"
-import type { WebhookHandlerInfo } from "./webhook.js"
+import { webhookRegistry } from "./webhook-registry.js"
+import { createFileRouteHandler, FILE_ROUTE_PATH } from "./file-server.js"
 
 /** 适配器 id */
 export const ADAPTER_ID = "qqbot"
 
 export { ACCOUNT_SCHEMA, validateAccount } from "./config.js"
 export type { QQBotAccount, QQBotMode } from "./config.js"
-
-/** Webhook 处理器注册表：appId → handler info */
-const webhookHandlers = new Map<string, WebhookHandlerInfo>()
-
-/** 注册 webhook 处理器 */
-export function registerWebhookHandler(appId: string, info: WebhookHandlerInfo): void {
-  webhookHandlers.set(appId, info)
-}
-
-/** 注销 webhook 处理器 */
-export function unregisterWebhookHandler(appId: string): void {
-  webhookHandlers.delete(appId)
-}
+export { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-registry.js"
 
 /** 插件定义 */
 const plugin: PluginDefinition<Record<string, never>> = definePlugin({
@@ -43,12 +32,18 @@ const plugin: PluginDefinition<Record<string, never>> = definePlugin({
 
   setup(ctx) {
     // 注册 webhook 路由：/qqbot（统一入口，通过 header 区分账号）
-    ctx.route("POST", "/qqbot", createWebhookHandler(webhookHandlers), {
+    ctx.route("POST", "/qqbot", createWebhookHandler(webhookRegistry), {
       auth: false,
       rawBody: true,
       bodyLimit: 2 * 1024 * 1024
     })
     ctx.logger.info("QQ Bot Webhook 路由已注册：/plugin/adapter-qqbot/qqbot")
+
+    // 注册文件路由：Markdown 图片的公网取回入口（QQ 服务器拉图不走 WebUI 鉴权）
+    ctx.route("GET", `${FILE_ROUTE_PATH}/:name`, createFileRouteHandler(), {
+      auth: false
+    })
+    ctx.logger.info(`QQ Bot 文件路由已注册：/plugin/adapter-qqbot${FILE_ROUTE_PATH}/:name`)
 
     const provider: AdapterProvider<QQBotAccount> = {
       id: ADAPTER_ID,

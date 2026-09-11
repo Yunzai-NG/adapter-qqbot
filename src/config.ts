@@ -114,8 +114,62 @@ export const ACCOUNT_SCHEMA = s.object({
     .boolean()
     .default(false)
     .title("群聊 Markdown")
-    .desc("启用后群聊消息将使用 Markdown 格式发送（需要原生md权限，暂不支持模板md）")
+    .desc("启用后群聊消息将使用 Markdown 格式发送（需 Markdown 权限）")
     .order(14),
+
+  markdownMode: s
+    .select([
+      { value: "raw", label: "原生 Markdown", description: "原生 Markdown + 交互键盘" },
+      { value: "inline", label: "内联指令", description: "原生 Markdown + 文本指令链" },
+      { value: "template", label: "模板 Markdown", description: "按配置的模板 ID 与参数键发送" },
+      { value: "legacy", label: "纯文本", description: "禁用富 Markdown，按普通消息拆分" }
+    ])
+    .default("raw")
+    .title("Markdown 模式")
+    .desc("Markdown 总开关开启时采用的发送策略")
+    .order(15),
+
+  markdownTemplateId: s
+    .string()
+    .default("")
+    .title("Markdown 模板 ID")
+    .desc("template 模式使用的 custom_template_id")
+    .showWhen({ markdownMode: ["template"] })
+    .order(16),
+
+  markdownTemplateKeys: s
+    .string()
+    .default("abcdefghij")
+    .title("模板参数键")
+    .desc("按顺序填写模板参数 key，例如 abcdefghij")
+    .showWhen({ markdownMode: ["template"] })
+    .order(17),
+
+  keyboardTemplateId: s
+    .string()
+    .default("")
+    .title("键盘模板 ID")
+    .desc("留空时发送自定义按钮内容，填写后使用平台按钮模板")
+    .showWhen({ markdownMode: ["raw", "template"] })
+    .order(18),
+
+  forwardMode: s
+    .select([
+      { value: "merge", label: "合并", description: "转发的多个节点合并进一条消息发送" },
+      { value: "multiple", label: "多条", description: "转发的每个节点各自作为一条消息发送" }
+    ])
+    .default("merge")
+    .title("转发消息格式")
+    .desc("合并把各节点文本拼进一条消息；多条按节点拆成多条。含图片/视频等富媒体时仍会因平台单条限制单独成条")
+    .order(22),
+
+  imageMaxSizeMb: s
+    .number()
+    .default(4)
+    .min(1)
+    .title("图片压缩上限（MiB）")
+    .desc("sharp 可用时将超限图片压缩；未安装则原样发送")
+    .order(19),
 
   imageHostScript: s
     .string()
@@ -123,6 +177,14 @@ export const ACCOUNT_SCHEMA = s.object({
     .title("图床脚本路径")
     .desc("自定义图床 JS 脚本路径，脚本需 export default 一个函数，接收图片数据返回公网 URL。用于在 Markdown 消息中发送图片")
     .order(15),
+
+  serverAddress: s
+    .string()
+    .default("")
+    .title("文件服务地址")
+    .desc("把渲染图片转公网 URL 供 Markdown 引用。填核心面板的公网地址（如 http://192.168.1.2:2536 或穿透域名），留空则用内核面板地址。与图床脚本二选一，脚本优先")
+    .placeholder("http://地址:端口 或 https://穿透域名")
+    .order(21),
 
   listenPath: s
     .string()
@@ -194,6 +256,15 @@ export function validateAccount(input: unknown): QQBotAccount {
         severity: "error"
       })
     }
+  }
+
+  const serverAddress = account.serverAddress.trim()
+  if (serverAddress && !/^https?:\/\//i.test(serverAddress)) {
+    issues.push({
+      path: "serverAddress",
+      message: "文件服务地址应以 http:// 或 https:// 开头",
+      severity: "error"
+    })
   }
 
   if (issues.length > 0) throw new SchemaError(issues)

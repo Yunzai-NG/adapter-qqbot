@@ -15,17 +15,13 @@ interface CachedToken {
   expiresAt: number
 }
 
-/**
- *
- */
+/** Access Token 管理器：内存 + KV 双层缓存，并发刷新去重 */
 export class TokenManager {
   private token = ""
   private expiresAt = 0
   private refreshPromise: Promise<string> | null = null
 
-  /**
-   *
-   */
+  /** @param kv 可选的持久化命名空间，用于跨进程复用 token */
   constructor(
     private account: QQBotAccount,
     private http: HttpClient,
@@ -33,9 +29,7 @@ export class TokenManager {
     private kv?: KvNamespace
   ) {}
 
-  /**
-   *
-   */
+  /** 取得有效 token：过期前 60 秒即视为需要刷新 */
   async getToken(): Promise<string> {
     // 内存缓存有效
     if (this.token && Date.now() < this.expiresAt - 60 * 1000) {
@@ -49,8 +43,8 @@ export class TokenManager {
         this.token = cached.token
         this.expiresAt = cached.expiresAt
         const expireTime = new Date(this.expiresAt).toLocaleString("zh-CN")
-      this.logger.debug(`Access Token 从缓存恢复，有效期至 ${expireTime}`)
-      return this.token
+        this.logger.debug(`Access Token 从缓存恢复，有效期至 ${expireTime}`)
+        return this.token
       }
     }
 
@@ -112,16 +106,12 @@ export class TokenManager {
     }
   }
 
-  /**
-   *
-   */
+  /** API 基址：沙箱环境与正式环境不同 */
   getApiBase(): string {
     return this.account.sandbox ? SANDBOX_API_BASE : API_BASE
   }
 
-  /**
-   *
-   */
+  /** 构造带 token 的 Authorization 头 */
   async getAuthHeader(): Promise<Record<string, string>> {
     const token = await this.getToken()
     return { Authorization: `QQBot ${token}` }

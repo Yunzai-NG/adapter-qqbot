@@ -13,10 +13,10 @@ import type {
   BotDriver,
   HttpClient,
   MessageContent,
-  MessageRecord,
   SendOptions,
   SendResult,
   SendTarget,
+  Segment,
   UserInfo,
   GroupInfo,
   MemberInfo,
@@ -24,28 +24,41 @@ import type {
   ForwardNode
 } from "@yunzai-ng/types"
 import { toSegments } from "@yunzai-ng/core"
-import { encodeSegments, PLATFORM, addGuildPrefix, stripGuildPrefix } from "./codec.js"
+import {
+  PLATFORM,
+  addGuildPrefix,
+  stripGuildPrefix,
+  plainGuildId,
+  isGroupOpenId,
+  isGuildScopeId,
+  mapGroupRole,
+  mapGuildRole
+} from "./codec.js"
 import { decodeEvent } from "./events.js"
 import type { QQBotAccount } from "./config.js"
 import { TokenManager } from "./auth.js"
 import { ApiClient } from "./api.js"
 import { Gateway } from "./gateway.js"
-import type { ReadyData, SendMessageRequest } from "./types.js"
-import { readFile } from "node:fs/promises"
-import { initImageHost, uploadToImageHost, getImageHost } from "./image-host.js"
+import type { ReadyData, SendMessageRequest, SendMessageResponse, WSPayload } from "./types.js"
+import { resolveMedia } from "./media.js"
+import { markdownImage } from "./markdown.js"
 import { getImageSize } from "./image-size.js"
-import { registerWebhookHandler, unregisterWebhookHandler } from "./index.js"
+import { buildOutbound, type OutboundMessage } from "./outbound.js"
+import { MediaUploader } from "./upload.js"
+import { ImageHost } from "./image-host.js"
+import { fileUrl, publishFile } from "./file-server.js"
+import { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-registry.js"
 import { Ed25519 } from "./ed25519.js"
-import type { WSPayload } from "./types.js"
 
 const SHARE_INFO_URL = "https://qun.qq.com/cgi-bin/group_pro/robot/manager/share_info"
-const BKN = 508459323
+/** share_info 接口固定的 bkn 参数 */
+const SHARE_INFO_BKN = 508459323
 
 /** 获取机器人真实 QQ 号 */
 async function getRobotUin(appId: string, http: HttpClient): Promise<string | null> {
   try {
     const response = await http.request<{ data?: { robot_data?: { robot_uin?: string } } }>(
-      `${SHARE_INFO_URL}?bkn=${BKN}&robot_appid=${appId}`,
+      `${SHARE_INFO_URL}?bkn=${SHARE_INFO_BKN}&robot_appid=${appId}`,
       {
         method: "GET",
         headers: {
@@ -62,30 +75,18 @@ async function getRobotUin(appId: string, http: HttpClient): Promise<string | nu
   }
 }
 
-/** 读取本地文件并转为 base64 */
-async function readFileAsBase64(filePath: string): Promise<string> {
-  const buffer = await readFile(filePath)
-  return buffer.toString("base64")
-}
-
-/**
- * 将频道场景 gid（qg_ 前缀或「频道号-子频道」组合格式）还原为纯 guild_id。
- * 群聊 gid 为 32 位大写十六进制，不含 "-"，不会误入此函数的拆分逻辑。
- */
-function plainGuildId(gid: string): string {
-  const plain = stripGuildPrefix(gid)
-  const dash = plain.indexOf("-")
-  return dash === -1 ? plain : plain.slice(0, dash)
-}
-
 /** 声明支持的能力 */
 const CAPS: readonly BotCapability[] = [
   "recall",
   "forward",
-  "groupCard",
   "groupMute",
   "groupKick",
-  "groupRequest"
+  "groupRequest",
+  "groupFile",
+  "reaction",
+  "markdown",
+  "keyboard",
+  "guild"
 ]
 
 /** 创建 BotDriver */
@@ -100,41 +101,125 @@ export function createQQBotBot(
   // 频道私信映射缓存：uid → guildId
   const directMessageGuildMap = new Map<string, string>()
 
-  // 消息目标缓存：messageId → SendTarget，用于撤回消息
-  const messageTargetMap = new Map<string, SendTarget>()
+  // 消息目标缓存：messageId → SendTarget，用于撤回消息（10 分钟 / 最多 1000 条）
+  const messageTargetMap = new Map<string, { target: SendTarget; time: number }>()
+  const MESSAGE_TARGET_TTL = 10 * 60 * 1000
+  const MESSAGE_TARGET_LIMIT = 1000
+
+  // 最近入站消息：目标 → 被动回复上下文（平台只认 5 分钟内的 msg_id/event_id）
+  const replyContext = new Map<string, { msgId: string; eventId?: string; time: number }>()
+  // 同一 msg_id 的回复序号必须递增；主动推送使用随机初始值
+  const seqCounter = new Map<string, number>()
+
+  // 图床：按账号独立实例，connect() 时加载脚本
+  const imageHost = new ImageHost()
 
   const tokenManager = new TokenManager(account, deps.http, host.logger)
   const api = new ApiClient(tokenManager, deps.http, host.logger)
+  const uploader = new MediaUploader(api, deps.http, host.logger)
+
+  function resolveSelfId(fallback: string): Promise<string> {
+    if (account.robotUin) return Promise.resolve(account.robotUin)
+    return getRobotUin(account.appId, deps.http).then(uin => uin ?? fallback)
+  }
+
+  function targetKey(target: SendTarget): string {
+    if (target.scene === "group") return `group:${target.gid}`
+    if (target.scene === "guild") return `guild:${target.channelId}`
+    return `private:${target.uid}`
+  }
+
+  function rememberMessageTarget(messageId: string, target: SendTarget): void {
+    const now = Date.now()
+    for (const [id, value] of messageTargetMap) {
+      if (now - value.time > MESSAGE_TARGET_TTL) messageTargetMap.delete(id)
+    }
+    messageTargetMap.delete(messageId)
+    messageTargetMap.set(messageId, { target, time: now })
+    while (messageTargetMap.size > MESSAGE_TARGET_LIMIT) {
+      const firstId = messageTargetMap.keys().next().value
+      if (firstId === undefined) break
+      messageTargetMap.delete(firstId)
+    }
+  }
+
+  function rememberReplyContext(target: SendTarget, messageId: string, eventId?: string): void {
+    const now = Date.now()
+    replyContext.set(targetKey(target), { msgId: messageId, eventId, time: now })
+    for (const [key, value] of replyContext) {
+      if (now - value.time > 300_000) replyContext.delete(key)
+    }
+  }
+
+  function nextMessageSequence(messageId?: string): number {
+    if (!messageId) return Math.floor(Math.random() * 999_999) + 1
+    const next = (seqCounter.get(messageId) ?? 0) + 1
+    seqCounter.set(messageId, next)
+    return next
+  }
+
+  /**
+   * 回填被动回复与引用上下文
+   *
+   * `msg_id` 与 `message_reference` 是两个独立语义：
+   * - `msg_id`：被动回复标记（5 分钟内免主动额度），自动补，不产生引用样式
+   * - `message_reference`：引用 UI，只在内核显式传 quote（e.reply 的 quote 选项 / reply 段）时设置
+   */
+  function applyReplyContext(target: SendTarget, request: SendMessageRequest, quote?: string): void {
+    const reference = quote ?? request.msg_id
+    if (reference) {
+      if (reference.startsWith("event_")) {
+        request.event_id = reference.slice("event_".length)
+        delete request.msg_id
+        delete request.message_reference
+      } else {
+        request.msg_id = reference
+        request.message_reference = { message_id: reference }
+      }
+    } else if (!request.event_id) {
+      const context = replyContext.get(targetKey(target))
+      if (context && Date.now() - context.time <= 300_000) {
+        // 仅被动回复标记；不挂 message_reference，避免每条回复都变成引用回复
+        if (context.eventId) request.event_id = context.eventId
+        else request.msg_id = context.msgId
+      }
+    }
+    request.msg_seq = nextMessageSequence(request.msg_id ?? request.event_id)
+  }
+
+  // 事件入口：gateway onEvent 与 webhook handler 共用
+  function ingest(eventType: string, data: unknown): void {
+    // 拦截频道私信事件，记录 uid → guildId 映射
+    // （键与 decodeDirectMessage 产出的带 qg_ 前缀 uid 保持一致）
+    if (eventType === "DIRECT_MESSAGE_CREATE") {
+      const dmData = data as { author?: { id?: string }; guild_id?: string }
+      if (dmData.author?.id && dmData.guild_id) {
+        directMessageGuildMap.set(addGuildPrefix(dmData.author.id), dmData.guild_id)
+      }
+    }
+
+    const event = decodeEvent(eventType, data)
+    if (event) {
+      if (event.kind === "message") {
+        const target: SendTarget = event.scene === "group"
+          ? { scene: "group", gid: event.group!.gid }
+          : event.scene === "guild"
+            ? { scene: "guild", guildId: event.channel!.guildId, channelId: event.channel!.channelId }
+            : { scene: "private", uid: event.sender.uid }
+        rememberReplyContext(target, event.messageId)
+      }
+      host.submit(event)
+    }
+  }
+
   const gateway = new Gateway(
     account,
     tokenManager,
     {
-      onEvent: (eventType, data) => {
-        // 拦截频道私信事件，记录 uid → guildId 映射
-        if (eventType === "DIRECT_MESSAGE_CREATE") {
-          const dmData = data as { author?: { id?: string }; guild_id?: string }
-          if (dmData.author?.id && dmData.guild_id) {
-            // 键与 decodeDirectMessage 产出的带 qg_ 前缀的 uid 保持一致
-            directMessageGuildMap.set(addGuildPrefix(dmData.author.id), dmData.guild_id)
-          }
-        }
-
-        const event = decodeEvent(eventType, data)
-        if (event) {
-          host.submit(event)
-        }
-      },
+      onEvent: (eventType, data) => ingest(eventType, data),
       onReady: async (data: ReadyData) => {
         nickname = data.user.username
-
-        // 先获取真实 QQ 号，再设置 selfId
-        let resolvedId = account.robotUin || data.user.id
-        if (!account.robotUin) {
-          const uin = await getRobotUin(account.appId, deps.http)
-          if (uin) resolvedId = uin
-        }
-
-        selfId = resolvedId
+        selfId = await resolveSelfId(data.user.id)
         host.logger.debug(`已连接 QQ Bot：${nickname} (${selfId})`)
         host.setStatus("online")
       },
@@ -145,6 +230,154 @@ export function createQQBotBot(
     host.logger
   )
 
+  // 判定目标场景是否启用 markdown（群/C2C 用 groupMarkdown，频道/频道私信用 guildMarkdown）
+  function resolveMarkdownEnabled(target: SendTarget): boolean {
+    if (target.scene === "group" || (target.scene === "private" && !directMessageGuildMap.has(target.uid))) {
+      return account.groupMarkdown === true
+    }
+    if (target.scene === "guild" || (target.scene === "private" && directMessageGuildMap.has(target.uid))) {
+      return account.guildMarkdown === true
+    }
+    return false
+  }
+
+  // JSON body 消息按场景分发（图床 markdown 与纯文本/markdown 共用）
+  async function dispatchSend(target: SendTarget, request: SendMessageRequest): Promise<SendMessageResponse> {
+    if (target.scene === "group") return api.sendGroupMessage(target.gid, request)
+    if (target.scene === "private") {
+      const guildId = directMessageGuildMap.get(target.uid)
+      return guildId ? api.sendDirectMessage(guildId, request) : api.sendC2CMessage(target.uid, request)
+    }
+    if (target.scene === "guild") return api.sendGuildMessage(target.channelId, request)
+    throw new Error("QQ Bot 适配器不支持此消息场景")
+  }
+
+  function isGuildTransport(target: SendTarget): boolean {
+    return target.scene === "guild" || (target.scene === "private" && directMessageGuildMap.has(target.uid))
+  }
+
+  async function executeOutbound(target: SendTarget, message: OutboundMessage, quote?: string): Promise<SendMessageResponse> {
+    const request: SendMessageRequest = { ...message.request }
+    applyReplyContext(target, request, quote)
+
+    let response: SendMessageResponse
+    if (message.upload) {
+      if (target.scene === "group") {
+        const uploaded = await uploader.upload(message.upload.ref, {
+          target: "group", targetId: target.gid, fileType: message.upload.fileType, fileName: message.upload.name
+        })
+        request.media = { file_info: uploaded.file_info }
+      } else if (target.scene === "private" && !isGuildTransport(target)) {
+        const uploaded = await uploader.upload(message.upload.ref, {
+          target: "user", targetId: target.uid, fileType: message.upload.fileType, fileName: message.upload.name
+        })
+        request.media = { file_info: uploaded.file_info }
+      } else {
+        throw new Error("频道场景不能走 QQ 富媒体上传接口")
+      }
+    }
+
+    if (message.guildBlob) {
+      const { buffer } = await resolveMedia(message.guildBlob, deps.http)
+      if (target.scene === "guild") response = await api.sendGuildMessageWithImage(target.channelId, request, buffer)
+      else if (target.scene === "private" && isGuildTransport(target)) {
+        response = await api.sendDirectMessageWithImage(directMessageGuildMap.get(target.uid)!, request, buffer)
+      } else throw new Error("只有频道场景可使用 multipart 图片")
+    } else {
+      response = await dispatchSend(target, request)
+    }
+    rememberMessageTarget(response.id, target)
+    return response
+  }
+
+  /** 文件服务的对外基址：账号配置优先，否则用内核面板地址；服务器未启用返回空串 */
+  function resolveFileBaseUrl(): string {
+    const configured = account.serverAddress.trim()
+    if (configured) return configured.replace(/\/+$/, "")
+    const server = host.server
+    return server.enabled ? server.publicUrl.replace(/\/+$/, "") : ""
+  }
+
+  /**
+   * Markdown 图片计划：图片统一转公网 URL 后以 Markdown 发送，**绝不走 QQ 富媒体**
+   *
+   * 转换通道：图床脚本优先，失败降级内置 file 路由；两者都不可用时图片降级为
+   * 文本占位并告警。Markdown 未启用或 legacy 模式才返回 undefined 走原生路径。
+   */
+  async function buildMarkdownImagePlans(
+    target: SendTarget,
+    content: MessageContent
+  ): Promise<OutboundMessage[] | undefined> {
+    if (!resolveMarkdownEnabled(target) || account.markdownMode === "legacy") return undefined
+    const segments = toSegments(content)
+    if (!segments.some(segment => segment.type === "image")) return undefined
+
+    const transformed: Segment[] = []
+    for (const segment of segments) {
+      if (segment.type !== "image") {
+        transformed.push(segment)
+        continue
+      }
+      const converted = await convertMarkdownImage(segment)
+      if (converted) {
+        transformed.push({
+          type: "markdown",
+          content: markdownImage(
+            converted.url,
+            segment.summary ?? "图片",
+            segment.width ?? converted.size?.width,
+            segment.height ?? converted.size?.height
+          )
+        })
+      } else {
+        transformed.push({ type: "text", text: "[图片]" })
+      }
+    }
+    return buildOutbound(transformed, {
+      scene: isGuildTransport(target) ? "guild" : target.scene,
+      markdownEnabled: true,
+      markdownMode: account.markdownMode,
+      markdownTemplateId: account.markdownTemplateId || undefined,
+      markdownTemplateKeys: account.markdownTemplateKeys,
+      keyboardTemplateId: account.keyboardTemplateId || undefined,
+      appId: account.appId,
+      forwardMode: account.forwardMode,
+      warn: message => host.logger.warn(message)
+    })
+  }
+
+  /** 单张图片转公网 URL 的结果 */
+  interface ConvertedImage {
+    /** 公网 URL */
+    url: string
+    /** 实测宽高（Markdown 图片描述符需要） */
+    size?: { width: number; height: number }
+  }
+
+  /** 单张图片转公网 URL：图床脚本优先，失败或未配置时降级内置 file 路由 */
+  async function convertMarkdownImage(segment: Extract<Segment, { type: "image" }>): Promise<ConvertedImage | undefined> {
+    try {
+      const resolved = await resolveMedia(segment.file, deps.http)
+      const size = getImageSize(resolved.buffer) ?? undefined
+      if (imageHost.enabled) {
+        const url = await imageHost.upload(resolved.buffer, {
+          filename: resolved.fileName,
+          mimeType: resolved.mime
+        })
+        if (url) return { url, size }
+        host.logger.warn("[qqbot] 图床上传失败，降级内置文件路由")
+      }
+      const baseUrl = resolveFileBaseUrl()
+      if (baseUrl) {
+        return { url: fileUrl(baseUrl, publishFile(resolved.buffer, resolved.mime)), size }
+      }
+      host.logger.warn("[qqbot] 无可用图片公网通道（图床脚本与文件服务地址均未配置），图片已降级为文本")
+      return undefined
+    } catch (err) {
+      host.logger.warn(`[qqbot] Markdown 图片处理失败，已降级为文本：${err instanceof Error ? err.message : String(err)}`)
+      return undefined
+    }
+  }
   const driver: BotDriver = {
     platform: PLATFORM,
     adapterId: deps.adapterId,
@@ -161,43 +394,28 @@ export function createQQBotBot(
     },
 
     async connect(): Promise<void> {
-      // 连接前先获取真实 QQ 号
-      if (!account.robotUin) {
-        const uin = await getRobotUin(account.appId, deps.http)
-        if (uin) {
-          selfId = uin
-        }
-      } else {
-        selfId = account.robotUin
-      }
+      // 连接前先确定 selfId（真实 QQ 号），获取失败则保持当前值
+      selfId = await resolveSelfId(selfId)
 
       // 初始化图床
       if (account.imageHostScript) {
-        await initImageHost({
-          enabled: true,
-          scriptPath: account.imageHostScript
-        }, host.logger)
+        await imageHost.load(account.imageHostScript, host.logger)
+      }
+
+      // 无图床脚本时 Markdown 图片依赖文件路由；回环地址 QQ 拉不到，提前提醒
+      if (!imageHost.enabled && (account.groupMarkdown || account.guildMarkdown)) {
+        const base = resolveFileBaseUrl()
+        if (base && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(base)) {
+          host.logger.warn(`[qqbot] 文件服务地址为回环地址（${base}），QQ 客户端可能无法拉取 Markdown 图片，请在账号配置 serverAddress 填公网地址或穿透域名`)
+        }
       }
 
       // 根据模式选择不同的连接方式
       if (account.mode === "webhook") {
-        // Webhook 模式：注册处理器到统一入口
+        // Webhook 模式：注册处理器到统一入口，复用 gateway 的事件处理逻辑
         const webhookHandler = (appId: string, packet: WSPayload) => {
-          // 复用 gateway 的事件处理逻辑
           if (packet.op === 0 && packet.t) {
-            // 拦截频道私信事件，记录 uid → guildId 映射
-            if (packet.t === "DIRECT_MESSAGE_CREATE") {
-              const dmData = packet.d as { author?: { id?: string }; guild_id?: string }
-              if (dmData.author?.id && dmData.guild_id) {
-                // 键与 decodeDirectMessage 产出的带 qg_ 前缀的 uid 保持一致
-                directMessageGuildMap.set(addGuildPrefix(dmData.author.id), dmData.guild_id)
-              }
-            }
-
-            const event = decodeEvent(packet.t, packet.d)
-            if (event) {
-              host.submit(event)
-            }
+            ingest(packet.t, packet.d)
           }
         }
 
@@ -228,316 +446,53 @@ export function createQQBotBot(
     },
 
     async sendMessage(target: SendTarget, content: MessageContent, opts?: SendOptions): Promise<SendResult> {
-      const segments = toSegments(content)
-      const { content: text, markdown, image, msgType } = encodeSegments(segments)
-
-      // 处理引用回复
-      const messageReference = opts?.quote ? { message_id: opts.quote } : undefined
-
-      // 处理图片消息：使用图床将图片转为公网 URL，通过 Markdown 格式发送
-      // 检查对应场景的 markdown 开关是否启用
-      let markdownEnabled = false
-      if (target.scene === "group" || (target.scene === "private" && !directMessageGuildMap.has(target.uid))) {
-        // 群聊或 C2C 私聊
-        markdownEnabled = account.groupMarkdown === true
-      } else if (target.scene === "guild" || (target.scene === "private" && directMessageGuildMap.has(target.uid))) {
-        // 频道消息或频道私信
-        markdownEnabled = account.guildMarkdown === true
+      const messages = await buildMarkdownImagePlans(target, content) ?? buildOutbound(toSegments(content), {
+        scene: isGuildTransport(target) ? "guild" : target.scene,
+        markdownEnabled: resolveMarkdownEnabled(target),
+        markdownMode: account.markdownMode,
+        markdownTemplateId: account.markdownTemplateId || undefined,
+        markdownTemplateKeys: account.markdownTemplateKeys,
+        keyboardTemplateId: account.keyboardTemplateId || undefined,
+        appId: account.appId,
+        forwardMode: account.forwardMode,
+        warn: message => host.logger.warn(message)
+      })
+      if (!messages.length) {
+        throw new Error("QQ Bot 没有可发送的消息内容")
       }
 
-      if (image && getImageHost().enabled && markdownEnabled) {
-        host.logger.info(`[image-host] 检测到图片，尝试通过图床上传`)
-
-        let imageBuffer: Buffer | undefined
-        let filename = `image_${Date.now()}.png`
-        let imageUrl: string | null = null
-        let imageSize: { width: number; height: number } | null = null
-
-        // 获取图片数据
-        switch (image.kind) {
-          case "url": {
-            // 已经是公网 URL，需要下载解析尺寸
-            imageUrl = image.url
-            try {
-              imageBuffer = Buffer.from(await deps.http.buffer(image.url))
-              imageSize = getImageSize(imageBuffer)
-            } catch (err: any) {
-              host.logger.warn(`[image-host] 下载图片失败: ${err.message}`)
-            }
-            break
-          }
-          case "base64":
-            imageBuffer = Buffer.from(image.base64, "base64")
-            imageSize = getImageSize(imageBuffer)
-            break
-          case "buffer":
-            imageBuffer = Buffer.from(image.data)
-            imageSize = getImageSize(imageBuffer)
-            break
-          case "path":
-            imageBuffer = await readFile(image.path)
-            imageSize = getImageSize(imageBuffer)
-            filename = image.path.split(/[\\/]/).pop() || filename
-            break
-          case "id":
-            host.logger.warn(`[image-host] 不支持 id 类型图片`)
-            break
-        }
-
-        // 上传到图床
-        if (imageBuffer) {
-          imageUrl = await uploadToImageHost(imageBuffer, { filename, mimeType: "image/png" })
-          if (imageUrl) {
-            host.logger.info(`[image-host] 图片上传成功: ${imageUrl}`)
-          } else {
-            host.logger.warn(`[image-host] 图片上传失败，降级为普通图片消息发送`)
-          }
-        }
-
-        // 如果成功获取图片 URL，发送 Markdown 消息
-        if (imageUrl) {
-          // QQ Bot markdown 图片必须带尺寸：![text #Wpx #Hpx](url)
-          const width = imageSize?.width ?? 1000
-          const height = imageSize?.height ?? 1000
-          // 如果有 markdown 内容，追加图片；否则只发送图片
-          const mdContent = markdown ? `${markdown}\n![image #${width}px #${height}px](${imageUrl})` : `![image #${width}px #${height}px](${imageUrl})`
-          const request: SendMessageRequest = {
-            msg_type: 2,
-            markdown: { content: mdContent },
-            message_reference: messageReference
-          }
-
-          let response: { id: string; timestamp: string }
-          if (target.scene === "group") {
-            response = await api.sendGroupMessage(target.gid, request)
-          } else if (target.scene === "private") {
-            const guildId = directMessageGuildMap.get(target.uid)
-            if (guildId) {
-              response = await api.sendDirectMessage(guildId, request)
-            } else {
-              response = await api.sendC2CMessage(target.uid, request)
-            }
-          } else if (target.scene === "guild") {
-            response = await api.sendGuildMessage(target.channelId, request)
-          } else {
-            throw new Error("QQ Bot 适配器不支持此消息场景")
-          }
-
-          messageTargetMap.set(response.id, target)
-          return {
-            ok: true,
-            messageId: response.id,
-            time: new Date(response.timestamp).getTime(),
-            raw: response
-          }
+      const responses: SendMessageResponse[] = []
+      const errors: unknown[] = []
+      for (const message of messages) {
+        try {
+          responses.push(await executeOutbound(target, message, opts?.quote))
+        } catch (err) {
+          errors.push(err)
+          host.logger.error(`[qqbot] 发送消息失败：${err instanceof Error ? err.message : String(err)}`)
         }
       }
-
-      // 如果有图片，需要先上传再发送
-      if (image) {
-        // 根据 MediaRef 类型构建上传请求
-        const uploadRequest: { file_type: number; url?: string; file_data?: string; srv_send_msg: boolean } = {
-          file_type: 1, // 1=图片
-          srv_send_msg: false
-        }
-
-        switch (image.kind) {
-          case "url":
-            uploadRequest.url = image.url
-            break
-          case "base64":
-            uploadRequest.file_data = image.base64
-            break
-          case "buffer":
-            uploadRequest.file_data = Buffer.from(image.data).toString("base64")
-            break
-          case "path":
-            uploadRequest.file_data = await readFileAsBase64(image.path)
-            break
-          case "id":
-            // 已上传的资源 id，直接使用
-            break
-        }
-
-        let fileInfo: string
-        let response: { id: string; timestamp: string }
-
-        if (target.scene === "group") {
-          const uploadResp = await api.uploadGroupMedia(target.gid, uploadRequest)
-          fileInfo = uploadResp.file_info
-
-          const mediaRequest: SendMessageRequest = {
-            msg_type: 7,
-            media: { file_info: fileInfo },
-            message_reference: messageReference
-          }
-          response = await api.sendGroupMessage(target.gid, mediaRequest)
-        } else if (target.scene === "private") {
-          // 检查是否是频道私信
-          const guildId = directMessageGuildMap.get(target.uid)
-          if (guildId) {
-            // 频道私信使用 multipart/form-data 发送图片
-            let imageBuffer: Buffer
-
-            switch (image.kind) {
-              case "url":
-                throw new Error("QQ Bot 频道私信不支持 URL 方式发送图片")
-              case "base64":
-                imageBuffer = Buffer.from(image.base64, "base64")
-                break
-              case "buffer":
-                imageBuffer = Buffer.from(image.data)
-                break
-              case "path":
-                imageBuffer = await readFile(image.path)
-                break
-              case "id":
-                throw new Error("QQ Bot 频道私信不支持 id 类型的图片")
-            }
-
-            const guildRequest: SendMessageRequest = {
-              content: text || "",
-              message_reference: messageReference
-            }
-            host.logger.info(`发送频道私信图片，大小: ${imageBuffer.length} bytes`)
-            try {
-              response = await api.sendDirectMessageWithImage(guildId, guildRequest, imageBuffer)
-              host.logger.info(`频道私信图片发送成功: ${response.id}`)
-            } catch (err: any) {
-              host.logger.error(`频道私信图片发送失败: ${err.message}`)
-              throw err
-            }
-          } else {
-            // C2C 私聊使用富媒体上传 API
-            const uploadResp = await api.uploadC2CMedia(target.uid, uploadRequest)
-            fileInfo = uploadResp.file_info
-
-            const mediaRequest: SendMessageRequest = {
-              msg_type: 7,
-              media: { file_info: fileInfo },
-              message_reference: messageReference
-            }
-            response = await api.sendC2CMessage(target.uid, mediaRequest)
-          }
-        } else if (target.scene === "guild") {
-          // 频道消息使用 multipart/form-data 发送图片
-          let imageBuffer: Buffer
-
-          host.logger.info(`频道消息图片类型: ${image.kind}`)
-
-          switch (image.kind) {
-            case "url": {
-              // 公网 URL 使用 image 字段
-              const request: SendMessageRequest = {
-                content: text || "",
-                image: image.url,
-                message_reference: messageReference
-              }
-              response = await api.sendGuildMessage(target.channelId, request)
-              return {
-                ok: true,
-                messageId: response.id,
-                time: new Date(response.timestamp).getTime(),
-                raw: response
-              }
-            }
-            case "base64":
-              imageBuffer = Buffer.from(image.base64, "base64")
-              break
-            case "buffer":
-              imageBuffer = Buffer.from(image.data)
-              break
-            case "path":
-              host.logger.info(`读取图片文件: ${image.path}`)
-              imageBuffer = await readFile(image.path)
-              break
-            case "id":
-              throw new Error("QQ Bot 频道消息不支持 id 类型的图片")
-          }
-
-          const guildRequest: SendMessageRequest = {
-            content: text || "",
-            message_reference: messageReference
-          }
-          host.logger.info(`发送频道图片，大小: ${imageBuffer.length} bytes`)
-          try {
-            response = await api.sendGuildMessageWithImage(target.channelId, guildRequest, imageBuffer)
-            host.logger.info(`频道图片发送成功: ${response.id}`)
-          } catch (err: any) {
-            host.logger.error(`频道图片发送失败: ${err.message}`)
-            throw err
-          }
-        } else {
-          throw new Error("QQ Bot 适配器不支持此消息场景")
-        }
-
-        // 缓存消息目标映射，用于撤回
-        messageTargetMap.set(response.id, target)
-
-        return {
-          ok: true,
-          messageId: response.id,
-          time: new Date(response.timestamp).getTime(),
-          raw: response
-        }
+      if (!responses.length) {
+        throw errors[0] instanceof Error ? errors[0] : new Error("QQ Bot 消息发送失败")
       }
 
-      // 纯文本或 Markdown 消息
-      const request: SendMessageRequest = {
-        message_reference: messageReference
-      }
-
-      // 只有当 markdownEnabled 为 true 时才发送 markdown 消息
-      if (msgType === 2 && markdown && markdownEnabled) {
-        request.msg_type = 2
-        request.markdown = { content: markdown }
-        request.content = text || ""
-      } else {
-        request.content = text || ""
-      }
-
-      // 发送消息
-      let response: { id: string; timestamp: string }
-
-      if (target.scene === "group") {
-        response = await api.sendGroupMessage(target.gid, request)
-      } else if (target.scene === "private") {
-        // 检查是否是频道私信
-        const guildId = directMessageGuildMap.get(target.uid)
-        if (guildId) {
-          response = await api.sendDirectMessage(guildId, request)
-        } else {
-          response = await api.sendC2CMessage(target.uid, request)
-        }
-      } else if (target.scene === "guild") {
-        response = await api.sendGuildMessage(target.channelId, request)
-      } else {
-        throw new Error("QQ Bot 适配器不支持此消息场景")
-      }
-
-      // 缓存消息目标映射，用于撤回
-      messageTargetMap.set(response.id, target)
-
+      const first = responses[0]
+      const messageIds = responses.map(response => response.id)
       return {
+        // 至少一条已送达即返回成功；失败明细保留在 raw，避免上层把已投递内容误判为全失败。
         ok: true,
-        messageId: response.id,
-        time: new Date(response.timestamp).getTime(),
-        raw: response
+        messageId: first.id,
+        time: new Date(first.timestamp).getTime(),
+        raw: {
+          messageIds,
+          responses,
+          ...(errors.length ? { errors } : {})
+        }
       }
     },
 
     async sendForward(target: SendTarget, nodes: ForwardNode[]): Promise<SendResult> {
-      // QQ Bot 不支持合并转发，降级为逐条发送
-      host.logger.warn("QQ Bot 不支持合并转发，将逐条发送消息")
-
-      let lastResult: SendResult | undefined
-      for (const node of nodes) {
-        if (node.message) {
-          lastResult = await this.sendMessage(target, node.message)
-        }
-      }
-
-      return lastResult || { ok: true, messageId: "", time: Date.now(), raw: {} }
+      if (!nodes.length) throw new Error("QQ Bot 转发消息没有节点")
+      return this.sendMessage(target, [{ type: "forward", nodes }])
     },
 
     async recallMessage(messageId: string): Promise<boolean> {
@@ -546,9 +501,11 @@ export function createQQBotBot(
       // - C2C 私聊: DELETE /v2/users/{openid}/messages/{message_id}
       // - 频道: DELETE /channels/{channel_id}/messages/{message_id}
       // - 频道私信: DELETE /dms/{guild_id}/messages/{message_id}
-      const target = messageTargetMap.get(messageId)
-      if (!target) {
-        host.logger.warn(`未找到消息 ${messageId} 的目标信息，无法撤回`)
+      const cached = messageTargetMap.get(messageId)
+      const target = cached?.target
+      if (!target || !cached || Date.now() - cached.time > MESSAGE_TARGET_TTL) {
+        if (cached) messageTargetMap.delete(messageId)
+        host.logger.warn(`未找到消息 ${messageId} 的有效目标信息，无法撤回`)
         return false
       }
 
@@ -653,7 +610,7 @@ export function createQQBotBot(
           let selfRole: "owner" | "admin" | "member" | undefined
           try {
             const memberInfo = await api.getGuildMemberInfo(guildId, selfId)
-            selfRole = memberInfo.roles.includes("4") ? "owner" : memberInfo.roles.includes("2") ? "admin" : "member"
+            selfRole = mapGuildRole(memberInfo.roles)
           } catch {
             // 查询失败时不设置 selfRole
           }
@@ -672,7 +629,7 @@ export function createQQBotBot(
       }
 
       // 判断是群聊还是频道+子频道
-      const isGroup = /^[A-F0-9]{32}$/.test(gid)
+      const isGroup = isGroupOpenId(gid)
 
       if (isGroup) {
         // 群聊 API
@@ -682,7 +639,7 @@ export function createQQBotBot(
           let selfRole: "owner" | "admin" | "member" | undefined
           try {
             const memberInfo = await api.getGroupMemberInfo(gid, selfId)
-            selfRole = memberInfo.role === "owner" ? "owner" : memberInfo.role === "admin" ? "admin" : "member"
+            selfRole = mapGroupRole(memberInfo.role)
           } catch {
             // 查询失败时不设置 selfRole
           }
@@ -704,13 +661,32 @@ export function createQQBotBot(
     },
 
     async getGroupList(): Promise<GroupInfo[]> {
-      // QQ Bot API:
-      // - 群聊: 不支持获取群列表
-      // - 频道: GET /users/@me/guilds
-      //   参数: before?, after?, limit?
-      //   返回: Guild 对象数组
-      // 群聊无法实现，频道可通过 callApi 调用
-      return []
+      const guilds: GroupInfo[] = []
+      const seen = new Set<string>()
+      let after: string | undefined
+
+      while (true) {
+        const page = await api.getGuildList(after)
+        if (!page.length) break
+        for (const guild of page) {
+          guilds.push({
+            gid: addGuildPrefix(guild.id),
+            name: guild.name,
+            avatar: guild.icon,
+            memberCount: guild.member_count,
+            maxMemberCount: guild.max_members,
+            owner: guild.owner_id
+          })
+        }
+        if (page.length < 100) break
+        const next = page.at(-1)?.id
+        if (!next || seen.has(next)) {
+          throw new Error("QQ Bot 频道列表分页游标重复或缺失")
+        }
+        seen.add(next)
+        after = next
+      }
+      return guilds
     },
 
     async getGroupMember(gid: string, uid: string): Promise<MemberInfo | undefined> {
@@ -723,8 +699,7 @@ export function createQQBotBot(
       // 通过 ID 格式判断是群聊还是频道
       // 群聊 ID (group_openid): 32位大写十六进制字符串
       // 频道 ID: qg_ 前缀、数字或「频道号-子频道」组合格式
-      const plainGid = stripGuildPrefix(gid)
-      const isGuild = plainGid.includes("-") || /^\d+$/.test(plainGid)
+      const isGuild = isGuildScopeId(gid)
 
       if (isGuild) {
         // 频道 API
@@ -736,7 +711,7 @@ export function createQQBotBot(
             name: memberInfo.user.username,
             avatar: memberInfo.user.avatar,
             card: memberInfo.nick,
-            role: memberInfo.roles.includes("4") ? "owner" : memberInfo.roles.includes("2") ? "admin" : "member",
+            role: mapGuildRole(memberInfo.roles),
             joinTime: memberInfo.joined_at ? Math.floor(new Date(memberInfo.joined_at).getTime() / 1000) : undefined
           }
         } catch {
@@ -749,7 +724,10 @@ export function createQQBotBot(
           return {
             uid: memberInfo.member_openid,
             gid,
-            role: memberInfo.role === "owner" ? "owner" : memberInfo.role === "admin" ? "admin" : "member"
+            name: memberInfo.username,
+            avatar: `https://q.qlogo.cn/qqapp/${account.appId}/${uid}/100`,
+            role: mapGroupRole(memberInfo.role),
+            joinTime: memberInfo.joined_at ? Math.floor(new Date(memberInfo.joined_at).getTime() / 1000) : undefined
           }
         } catch {
           return undefined
@@ -767,8 +745,7 @@ export function createQQBotBot(
       // 通过 ID 格式判断是群聊还是频道
       // 群聊 ID (group_openid): 32位大写十六进制字符串
       // 频道 ID: qg_ 前缀、数字或「频道号-子频道」组合格式
-      const plainGid = stripGuildPrefix(gid)
-      const isGuild = plainGid.includes("-") || /^\d+$/.test(plainGid)
+      const isGuild = isGuildScopeId(gid)
 
       if (isGuild) {
         // 频道 API
@@ -780,7 +757,7 @@ export function createQQBotBot(
             name: m.user.username,
             avatar: m.user.avatar,
             card: m.nick,
-            role: m.roles.includes("4") ? "owner" : m.roles.includes("2") ? "admin" : "member",
+            role: mapGuildRole(m.roles),
             joinTime: m.joined_at ? Math.floor(new Date(m.joined_at).getTime() / 1000) : undefined
           }))
         } catch {
@@ -793,7 +770,7 @@ export function createQQBotBot(
           return members.map((m) => ({
             uid: m.member_openid,
             gid,
-            role: m.role === "owner" ? "owner" : m.role === "admin" ? "admin" : "member"
+            role: mapGroupRole(m.role)
           }))
         } catch {
           return []
@@ -801,15 +778,9 @@ export function createQQBotBot(
       }
     },
 
-    async setGroupCard(_gid: string, _uid: string, _card: string): Promise<void> {
-      // QQ Bot API 不支持修改群名片
-      // 群聊和频道均无此 API
-      host.logger.warn("QQ Bot 不支持修改群名片")
-    },
-
     async muteGroupMember(gid: string, uid: string, seconds: number): Promise<void> {
       // 判断是群聊还是频道
-      const isGroup = /^[A-F0-9]{32}$/.test(gid)
+      const isGroup = isGroupOpenId(gid)
 
       if (isGroup) {
         // 群聊：POST /v2/groups/{group_openid}/restrict_chat_setting
@@ -822,15 +793,9 @@ export function createQQBotBot(
       }
     },
 
-    async muteGroupAll(_gid: string, _enable: boolean): Promise<void> {
-      // QQ Bot API 不支持全体禁言
-      // 群聊和频道均无此 API
-      host.logger.warn("QQ Bot 不支持全体禁言")
-    },
-
     async kickGroupMember(gid: string, uid: string, rejectAddAgain?: boolean): Promise<void> {
       // 判断是群聊还是频道
-      const isGroup = /^[A-F0-9]{32}$/.test(gid)
+      const isGroup = isGroupOpenId(gid)
 
       if (isGroup) {
         // 群聊：POST /v2/groups/{group_openid}/batch_remove_members
@@ -840,18 +805,6 @@ export function createQQBotBot(
         // 频道：DELETE /guilds/{guild_id}/members/{user_id}
         await api.kickGuildMember(plainGuildId(gid), stripGuildPrefix(uid), rejectAddAgain)
       }
-    },
-
-    async quitGroup(_gid: string): Promise<void> {
-      // QQ Bot API 不支持主动退群
-      // 群聊和频道均无此 API
-      host.logger.warn("QQ Bot 不支持主动退群")
-    },
-
-    async handleFriendRequest(_flag: string, _approve: boolean, _remark?: string): Promise<void> {
-      // QQ Bot API 不支持处理好友请求
-      // 群聊和 C2C 私聊均无此 API
-      host.logger.warn("QQ Bot 不支持处理好友请求")
     },
 
     async handleGroupRequest(flag: string, approve: boolean, reason?: string): Promise<void> {
@@ -868,32 +821,29 @@ export function createQQBotBot(
       await api.handleGroupJoinRequest(groupOpenId, memberOpenId, op, joinRequestId, reason)
     },
 
-    async setReaction(messageId: string, emojiId: string, _add = true): Promise<void> {
-      // QQ Bot API:
-      // - 频道: PUT /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
-      //   参数: type (1=系统表情, 2=emoji), id (表情 ID)
-      //   返回: 204 No Content
-      // - 取消: DELETE /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
-      // 群聊和 C2C 私聊不支持，频道可通过 callApi 调用
-      host.logger.warn("QQ Bot 仅频道支持表情表态，可通过 callApi 实现")
+    async setReaction(messageId: string, emojiId: string, add = true): Promise<void> {
+      const cached = messageTargetMap.get(messageId)
+      if (!cached || Date.now() - cached.time > MESSAGE_TARGET_TTL) {
+        if (cached) messageTargetMap.delete(messageId)
+        throw new Error(`未找到频道消息 ${messageId} 的有效目标信息，无法表态`)
+      }
+      if (cached.target.scene !== "guild") {
+        throw new Error("QQ Bot 仅支持对频道消息设置表态")
+      }
+      await api.setGuildMessageReaction(cached.target.channelId, messageId, emojiId, add)
     },
 
-    async uploadGroupFile(_gid: string, _file: string, _name: string, _folder?: string): Promise<void> {
-      // QQ Bot API:
-      // - 群聊: POST /v2/groups/{group_openid}/files
-      //   请求体: { file_type, url, srv_send_msg }
-      //   返回: { file_uuid }
-      // - C2C 私聊: POST /v2/users/{openid}/files
-      //   请求体: { file_type, url, srv_send_msg }
-      //   返回: { file_uuid }
-      // 需要先上传文件获取 URL，或通过富媒体接口上传
-      host.logger.warn("QQ Bot 文件上传需通过富媒体接口，可通过 callApi 实现")
-    },
-
-    async getMessage(_messageId: string): Promise<MessageRecord | undefined> {
-      // QQ Bot API 不支持获取消息详情
-      // 群聊、C2C 私聊、频道均无此 API
-      return undefined
+    async uploadGroupFile(gid: string, file: string, name: string, _folder?: string): Promise<void> {
+      if (!isGroupOpenId(gid)) {
+        throw new Error("QQ Bot 仅支持向群聊上传文件")
+      }
+      await uploader.upload({ kind: "path", path: file }, {
+        target: "group",
+        targetId: gid,
+        fileType: 4,
+        fileName: name,
+        srvSendMsg: true
+      })
     },
 
     callApi<T>(action: string, params?: Record<string, unknown>): Promise<T> {
@@ -904,7 +854,7 @@ export function createQQBotBot(
           Number(params?.code ?? 0)
         ) as Promise<T>
       }
-      return api.call(action, params as any)
+      return api.call<T>("POST", action, params)
     }
   }
 
