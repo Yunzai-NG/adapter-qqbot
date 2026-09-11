@@ -5,6 +5,28 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-09-11
+
+本次聚焦出站消息能力，完善消息段编解码、富媒体收发、Markdown 与交互键盘支持，并补齐相应测试覆盖。
+
+### 新增
+
+- **富媒体收发链路**：群聊与 C2C 支持图片、视频、语音和文件的官方富媒体上传；公网 URL 优先转存，其他来源自动走分片上传。频道场景支持图片 URL 与 multipart 直传。
+- **Markdown 图片与文件服务**：Markdown 图片会转为带尺寸的公网 URL；支持自定义图床脚本及内置临时文件服务作为回退通道。
+- **Markdown 发送模式**：支持原生、内联指令、模板及纯文本回退四种模式，并支持模板参数自动拆分。
+- **交互键盘与消息段**：支持 QQ 键盘、Ark、Embed、回复、转发及 `qqbot` 原始消息段的出站编码；转发可配置合并或逐条发送。
+- **附件解码**：收到的 QQ 附件按 MIME 类型统一转换为 `image`、`record`、`video` 或 `file` 消息段。
+- **可选能力依赖**：增加 `qrcode`、`sharp` 与 `silk-wasm` 可选依赖，分别用于二维码、图片压缩和 Silk 音频处理。
+
+### 变更
+
+- 重构消息编解码与出站发送流程，按 QQ 平台「单条消息仅一个富元素」限制自动拆分消息，并为无法编码的内容提供可读降级与日志告警。
+- 更新 README，补充 Markdown、图床、文件服务、富媒体及转发消息的配置和行为说明。
+
+### 修复
+
+- 同步锁文件与可选依赖，保证安装后可正确解析新增的媒体处理能力。
+
 ## [0.2.0] - 2026-09-08
 
 本次以「补齐事件模型」为主线，将适配器可上抛的 QQ 事件补齐至 54 种（消息 6、
@@ -54,5 +76,6 @@
 - 初始版本：QQ 官方机器人适配器，支持 WebSocket Gateway 与 Webhook 两种连接模式，
   覆盖群聊、C2C 私聊、频道、频道私信四大场景。
 
+[0.3.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.1.0
