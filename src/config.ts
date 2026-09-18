@@ -108,6 +108,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default(false)
     .title("频道 Markdown")
     .desc("启用后频道消息将使用 Markdown 格式发送（需要原生md权限，暂不支持模板md）")
+    .group("消息")
     .order(13),
 
   groupMarkdown: s
@@ -115,6 +116,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default(false)
     .title("群聊 Markdown")
     .desc("启用后群聊消息将使用 Markdown 格式发送（需 Markdown 权限）")
+    .group("消息")
     .order(14),
 
   markdownMode: s
@@ -127,6 +129,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default("raw")
     .title("Markdown 模式")
     .desc("Markdown 总开关开启时采用的发送策略")
+    .group("消息")
     .order(15),
 
   markdownTemplateId: s
@@ -135,6 +138,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .title("Markdown 模板 ID")
     .desc("template 模式使用的 custom_template_id")
     .showWhen({ markdownMode: ["template"] })
+    .group("消息")
     .order(16),
 
   markdownTemplateKeys: s
@@ -143,6 +147,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .title("模板参数键")
     .desc("按顺序填写模板参数 key，例如 abcdefghij")
     .showWhen({ markdownMode: ["template"] })
+    .group("消息")
     .order(17),
 
   keyboardTemplateId: s
@@ -151,6 +156,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .title("键盘模板 ID")
     .desc("留空时发送自定义按钮内容，填写后使用平台按钮模板")
     .showWhen({ markdownMode: ["raw", "template"] })
+    .group("消息")
     .order(18),
 
   forwardMode: s
@@ -161,6 +167,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default("merge")
     .title("转发消息格式")
     .desc("合并把各节点文本拼进一条消息；多条按节点拆成多条。含图片/视频等富媒体时仍会因平台单条限制单独成条")
+    .group("消息")
     .order(22),
 
   imageMaxSizeMb: s
@@ -169,6 +176,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .min(1)
     .title("图片压缩上限（MiB）")
     .desc("sharp 可用时将超限图片压缩；未安装则原样发送")
+    .group("图片")
     .order(19),
 
   imageHostScript: s
@@ -176,6 +184,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default("")
     .title("图床脚本路径")
     .desc("自定义图床 JS 脚本路径，脚本需 export default 一个函数，接收图片数据返回公网 URL。用于在 Markdown 消息中发送图片")
+    .group("图片")
     .order(15),
 
   serverAddress: s
@@ -183,6 +192,7 @@ export const ACCOUNT_SCHEMA = s.object({
     .default("")
     .title("文件服务地址")
     .desc("把渲染图片转公网 URL 供 Markdown 引用。填核心面板的公网地址（如 http://192.168.1.2:2536 或穿透域名），留空则用内核面板地址。与图床脚本二选一，脚本优先")
+    .group("图片")
     .placeholder("http://地址:端口 或 https://穿透域名")
     .order(21),
 

@@ -5,6 +5,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-09-18
+
+本次是收尾：账号配置在面板上按用途分组，依赖基线抬到当前内核。
+
+### 变更
+
+- **面板账号表单按用途分组。** 表单此前是十几个字段平铺一列，六项 Markdown 配置与转发格式夹在图片
+  参数与连接参数之间，找一项要逐行读下来。现分两组 —— `消息`（频道 Markdown、群聊 Markdown、
+  Markdown 模式、Markdown 模板 ID、模板参数键、键盘模板 ID、转发消息格式）与 `图片`（图片压缩上限、
+  图床脚本路径、文件服务地址）；连接方式、AppID / AppSecret、机器人 QQ 号、事件订阅、分片、沙箱与
+  Webhook 监听路径不进组。分组只写进 schema 的元数据，不改动校验与取值。
+
+- **依赖基线抬到 `@yunzai-ng/core >=0.4.0`、`@yunzai-ng/types >=0.3.0`**（原为 `>=0.2.0` / `>=0.1.1`），
+  锁文件随之重新解析。这项只影响安装时的依赖解析与兼容性校验，不改动运行时行为。
+
 ## [0.3.0] - 2026-09-11
 
 本次聚焦出站消息能力，完善消息段编解码、富媒体收发、Markdown 与交互键盘支持，并补齐相应测试覆盖。
@@ -76,6 +91,7 @@
 - 初始版本：QQ 官方机器人适配器，支持 WebSocket Gateway 与 Webhook 两种连接模式，
   覆盖群聊、C2C 私聊、频道、频道私信四大场景。
 
+[0.3.1]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.1.0

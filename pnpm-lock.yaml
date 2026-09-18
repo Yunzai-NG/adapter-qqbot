@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@yunzai-ng/core':
-        specifier: '>=0.2.0'
-        version: 0.3.0
+        specifier: '>=0.4.0'
+        version: 0.4.0
       '@yunzai-ng/types':
-        specifier: '>=0.1.1'
-        version: 0.2.0
+        specifier: '>=0.3.0'
+        version: 0.3.0
       formdata-node:
         specifier: ^6.0.3
         version: 6.0.3
@@ -647,12 +647,12 @@ packages:
   '@vitest/utils@2.1.9':
     resolution: {integrity: sha512-v0psaMSkNJ3A2NMrUEHFRzJtDPFn+/VWZ5WxImB21T9fjucJRmS7xCS3ppEnARb9y11OAzaD+P2Ps+b+BGX5iQ==}
 
-  '@yunzai-ng/core@0.3.0':
-    resolution: {integrity: sha512-2Nvk+cSQsSYkFxrfQtuQGUSz5HUP9OMwRi9WHm1bWIpUUvCmNsfQigz3d+23Wf65kZkL37KAHJSrQVABN6pKZg==}
+  '@yunzai-ng/core@0.4.0':
+    resolution: {integrity: sha512-QIjVqEUvRxUvvbuhk+U+uD1DX66+ZEP5xrruo9K4bhOYoapji9Rr1gxl4TGDwbuqNR6qazUwFAdxbgCJ1gTT2w==}
     engines: {node: '>=20.11.0'}
 
-  '@yunzai-ng/types@0.2.0':
-    resolution: {integrity: sha512-r9yzlAK/H56OEBvQGjKSefn68+rEpXRJAnMM+mK44jLshQ8/fcnTAXBeW06/HYWnH2hbBucYsolyFJN7sI2B/A==}
+  '@yunzai-ng/types@0.3.0':
+    resolution: {integrity: sha512-qwUztmobEuLrtyP/9RBy1zi/Vl9TMXFAWEg51pHJ/4ODh82n5/3OXjLJTdz9DS2A8LL5sfS9gy9d6fvAn+LZRQ==}
     engines: {node: '>=20.11.0'}
 
   abstract-level@2.0.2:
@@ -2211,11 +2211,11 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 1.2.0
 
-  '@yunzai-ng/core@0.3.0':
+  '@yunzai-ng/core@0.4.0':
     dependencies:
       '@fastify/static': 8.3.0
       '@fastify/websocket': 11.3.0
-      '@yunzai-ng/types': 0.2.0
+      '@yunzai-ng/types': 0.3.0
       croner: 9.1.0
       fastify: 5.12.3
       pino: 9.14.0
@@ -2228,7 +2228,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@yunzai-ng/types@0.2.0': {}
+  '@yunzai-ng/types@0.3.0': {}
 
   abstract-level@2.0.2:
     dependencies:

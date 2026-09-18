@@ -1,6 +1,6 @@
 {
   "name": "@yunzai-ng/adapter-qqbot",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "QQ Bot 官方机器人适配器：支持 WebSocket Gateway 和 Webhook 两种模式",
   "type": "module",
   "private": true,
@@ -34,8 +34,8 @@
     "verify": "pnpm run build && pnpm run typecheck:test && pnpm run lint && pnpm run test"
   },
   "peerDependencies": {
-    "@yunzai-ng/core": ">=0.2.0",
-    "@yunzai-ng/types": ">=0.1.1"
+    "@yunzai-ng/core": ">=0.4.0",
+    "@yunzai-ng/types": ">=0.3.0"
   },
   "dependencies": {
     "formdata-node": "^6.0.3",
