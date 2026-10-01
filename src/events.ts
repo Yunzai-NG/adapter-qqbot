@@ -1,23 +1,126 @@
 /**
  * 模块职责：将 QQ Bot 的事件报文翻译为内核的 IncomingEvent
  * 依赖方向：依赖 codec / types
- * 生命周期：纯函数
+ * 生命周期：纯函数（仅在传入 logger 时产生调试日志副作用）
  * 注意事项：
  *   - QQ Bot 的事件类型以 GROUP_AT_MESSAGE_CREATE、C2C_MESSAGE_CREATE 等命名
  *   - 需区分群消息、私聊消息、频道消息和频道私信
  *   - 部分事件（如 FRIEND_ADD）需要特殊处理
+ *   - 引用消息的取法随场景而异：群 / C2C 内联在 msg_elements，频道只有 message_reference
+ *   - 传入 logger 时会在入口打印平台下发的原始事件，便于调试
  */
-import type { IncomingEvent, IncomingMessageEvent, IncomingRequestEvent, UserInfo, MemberInfo } from "@yunzai-ng/types"
-import { decodeMessage, addGuildPrefix } from "./codec.js"
-import type { GroupMessageEvent, C2CMessageEvent, GuildMessageEvent, DirectMessageEvent } from "./types.js"
+import type {
+  IncomingEvent,
+  IncomingMessageEvent,
+  IncomingRequestEvent,
+  QuoteInfo,
+  Segment,
+  UserInfo,
+  MemberInfo,
+  Logger
+} from "@yunzai-ng/types"
+import { decodeMessage, addGuildPrefix, classifyAttachment, sceneExtValue } from "./codec.js"
+import { normalizeUrl } from "./media.js"
+import type {
+  Attachment,
+  GroupMessageEvent,
+  C2CMessageEvent,
+  GuildMessageEvent,
+  DirectMessageEvent,
+  MessageSceneInfo,
+  MsgElement,
+  MsgNode
+} from "./types.js"
+
+/** 序列化原始事件用于调试输出（容忍循环引用等不可序列化情况） */
+function stringifyRaw(data: unknown): string {
+  try {
+    return JSON.stringify(data)
+  } catch {
+    return String(data)
+  }
+}
+
+/**
+ * 把平台附件渲染成一行详细描述，供控制台排障
+ *
+ * 输出形如：
+ * `image,height=351,id=2216239210,size=48809,url=https://…,width=1206,file=https://…,name=xxx.jpg`
+ * 多个附件以 ` | ` 分隔；缺省字段（平台没下发）不输出，避免出现 `height=undefined`。
+ * @param attachments 平台下发的附件列表
+ * @returns 单行描述；无附件时为空串
+ */
+export function describeAttachments(attachments?: readonly Attachment[]): string {
+  if (!attachments || attachments.length === 0) return ""
+  return attachments
+    .map(attachment => {
+      const url = normalizeUrl(attachment.url)
+      const fields: Array<[string, unknown]> = [
+        ["height", attachment.height],
+        ["id", attachment.id],
+        ["size", attachment.size],
+        ["url", url],
+        ["width", attachment.width],
+        ["file", url],
+        ["name", attachment.filename],
+        // 语音专有：平台不保证下发，缺失时由 filter 自动略过
+        ["asr", attachment.asr_refer_text],
+        ["wav", attachment.voice_wav_url ? normalizeUrl(attachment.voice_wav_url) : undefined]
+      ]
+      const body = fields
+        .filter(([, value]) => value !== undefined && value !== null && value !== "")
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(",")
+      const type = classifyAttachment(attachment.content_type)
+      return body ? `${type},${body}` : type
+    })
+    .join(" | ")
+}
+
+/** 把消息段渲染成一行可读摘要，供引用详情日志使用 */
+function describeSegments(segments: readonly Segment[]): string {
+  return segments
+    .map(segment => {
+      switch (segment.type) {
+        case "text": return segment.text
+        case "at": return `@${segment.uid}`
+        case "atAll": return "@全体"
+        case "face": return `[表情${segment.id}]`
+        case "image": return `[图片${segment.summary ? ` ${segment.summary}` : ""}]`
+        case "record": return "[语音]"
+        case "video": return "[视频]"
+        case "file": return `[文件${segment.name ? ` ${segment.name}` : ""}]`
+        default: return `[${segment.type}]`
+      }
+    })
+    .join("")
+}
+
+/**
+ * 把引用消息渲染成一行详细描述，供控制台排障
+ *
+ * 输出形如：`引用 [REFIDX_X50iYj1Fv3B0jXJ5lwrZR+2…] 归途守候你(FF23…): 2`
+ * 群 / C2C 的索引是一长串 base64，截断以免淹没日志；频道只有 id、没有正文。
+ * @param quote 引用信息
+ * @returns 单行描述；无引用时为空串
+ */
+export function describeQuote(quote?: QuoteInfo): string {
+  if (!quote) return ""
+  const id = quote.messageId.length > 24 ? `${quote.messageId.slice(0, 24)}…` : quote.messageId
+  const head = `引用 [${id}]${quote.sender ? ` ${quote.sender.name ?? ""}(${quote.sender.uid})` : ""}`
+  const body = quote.message?.length ? describeSegments(quote.message) : quote.text ?? ""
+  return body ? `${head}: ${body}` : head
+}
 
 /**
  * 解析事件
  * @param eventType 事件类型
  * @param data 事件数据
+ * @param logger 可选日志器；传入时在入口打印平台下发的原始事件
  * @returns 内核事件；无法处理时 undefined
  */
-export function decodeEvent(eventType: string, data: unknown): IncomingEvent | undefined {
+export function decodeEvent(eventType: string, data: unknown, logger?: Logger): IncomingEvent | undefined {
+  logger?.debug(`[qqbot] 收到平台事件 ${eventType}：${stringifyRaw(data)}`)
   const payload = data as Record<string, any>
   switch (eventType) {
     // ── 消息事件 ──
@@ -278,6 +381,77 @@ function parseTimestamp(timestamp: unknown): number {
   return Math.floor(Date.now() / 1000)
 }
 
+// ── 引用消息解析 ──
+
+/** 引用关系的原始来源：群/C2C 走 msg_elements，频道走 message_reference */
+interface QuoteSource {
+  message_scene?: MessageSceneInfo
+  msg_elements?: MsgElement[]
+  parallel_message?: { msg_nodes?: MsgNode[] }
+  message_reference?: { message_id: string }
+}
+
+/** 取消息段里所有文本段拼成的纯文本（用于 QuoteInfo.text 摘要） */
+function plainTextOf(segments: readonly Segment[]): string {
+  let text = ""
+  for (const segment of segments) {
+    if (segment.type === "text") text += segment.text
+  }
+  return text.trim()
+}
+
+/**
+ * 构造引用消息。
+ *
+ * 三种场景取引用的方式并不相同：
+ * - 群 / C2C：报文带 `message_type=103`，被引消息的正文**内联**在 `msg_elements`，
+ *   引用索引在 `message_scene.ext` 的 `ref_msg_idx`。正文已经到手，无需额外请求，
+ *   这里直接解析成消息段 —— 否则 `e.images` 永远拿不到「被引用的图片」。
+ * - 频道 / 频道私信：只有 `message_reference.message_id`，正文需另调接口，故只填 id。
+ *
+ * 注意群 / C2C 没有真实的被引消息 id，`QuoteInfo.messageId` 只能填 `ref_msg_idx` 索引，
+ * 仅供日志与去重参考，不可直接用于发送时的 `message_reference`。
+ * @param source 消息事件报文
+ * @param guildScope 频道场景：被引正文里的 @ uid 需加 qg_ 前缀
+ * @returns 引用信息；无引用时 undefined
+ */
+function buildQuote(source: QuoteSource, guildScope = false): QuoteInfo | undefined {
+  // msg_elements 是权威来源；parallel_message 是部分版本随报文附带的等价内容，作兜底
+  const elements: MsgElement[] = source.msg_elements?.length
+    ? source.msg_elements
+    : (source.parallel_message?.msg_nodes ?? []).map(node => ({ content: node.content }))
+  const messageId = source.message_reference?.message_id
+    ?? sceneExtValue(source.message_scene?.ext, "ref_msg_idx")
+    ?? elements[0]?.msg_idx
+
+  if (!elements.length) {
+    return messageId ? { messageId } : undefined
+  }
+
+  const message: Segment[] = []
+  let sender: UserInfo | undefined
+  for (const element of elements) {
+    message.push(...decodeMessage(element.content, element.attachments, guildScope))
+    if (!sender && element.author?.id) {
+      sender = {
+        uid: guildScope ? addGuildPrefix(element.author.id) : element.author.id,
+        name: element.author.username,
+        avatar: element.author.avatar
+      }
+    }
+  }
+  if (!message.length) {
+    return messageId ? { messageId } : undefined
+  }
+
+  return {
+    messageId: messageId ?? "",
+    sender,
+    text: plainTextOf(message) || undefined,
+    message
+  }
+}
+
 // ── 消息事件解析 ──
 
 function decodeGroupMessage(data: GroupMessageEvent): IncomingMessageEvent {
@@ -295,7 +469,7 @@ function decodeGroupMessage(data: GroupMessageEvent): IncomingMessageEvent {
       role: data.author.role || "member"
     } as MemberInfo,
     group: { gid: data.group_openid },
-    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
+    quote: buildQuote(data),
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -314,7 +488,7 @@ function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
       name: data.author.username,
       avatar: data.author.avatar
     } as UserInfo,
-    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
+    quote: buildQuote(data),
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -339,7 +513,7 @@ function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
       guildId: data.guild_id,
       name: addGuildPrefix(`${data.guild_id}-${data.channel_id}`)
     },
-    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
+    quote: buildQuote(data, true),
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }
@@ -359,7 +533,7 @@ function decodeDirectMessage(data: DirectMessageEvent): IncomingMessageEvent {
       avatar: data.author.avatar
     } as UserInfo,
     channel: { channelId: data.channel_id, guildId: data.guild_id },
-    quote: data.message_reference ? { messageId: data.message_reference.message_id } : undefined,
+    quote: buildQuote(data, true),
     time: new Date(data.timestamp).getTime(),
     raw: data as unknown as Record<string, unknown>
   }

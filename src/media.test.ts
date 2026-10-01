@@ -3,7 +3,62 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { HttpClient, MediaRef } from "@yunzai-ng/types"
-import { inferFileType, mediaUrl, resolveMedia } from "./media.js"
+import { decodeMedia, inferFileType, mediaUrl, normalizeUrl, resolveMedia } from "./media.js"
+
+describe("decodeMedia / QQ 附件 → MediaRef", () => {
+  it("takes the native url and adds a missing scheme", () => {
+    expect(decodeMedia({
+      content_type: "image/jpeg",
+      filename: "a.jpg",
+      url: "gchat.qpic.cn/qmeetpic/1/0"
+    })).toEqual({ kind: "url", url: "https://gchat.qpic.cn/qmeetpic/1/0" })
+  })
+
+  it("leaves an already-absolute url untouched", () => {
+    expect(decodeMedia({
+      content_type: "video/mp4",
+      filename: "a.mp4",
+      url: "https://multimedia.nt.qq.com.cn/download?appid=1407"
+    })).toEqual({ kind: "url", url: "https://multimedia.nt.qq.com.cn/download?appid=1407" })
+  })
+
+  it("keeps the native voice url rather than the derived wav one", () => {
+    // 语音再转发时走的是 url；把它换成 wav 会让 QQ 的语音上传拿到非 SILK 系格式
+    expect(decodeMedia({
+      content_type: "voice",
+      filename: "v.amr",
+      url: "https://multimedia.nt.qq.com.cn/download?appid=1403",
+      voice_wav_url: "https://multimedia.nt.qq.com.cn/wav/1403.wav",
+      asr_refer_text: "今天天气不错"
+    })).toEqual({ kind: "url", url: "https://multimedia.nt.qq.com.cn/download?appid=1403" })
+  })
+
+  it("falls back to the wav url when the native url is absent", () => {
+    expect(decodeMedia({
+      content_type: "voice",
+      filename: "v.amr",
+      url: "",
+      voice_wav_url: "multimedia.nt.qq.com.cn/wav/1403.wav"
+    })).toEqual({ kind: "url", url: "https://multimedia.nt.qq.com.cn/wav/1403.wav" })
+  })
+
+  it("returns an empty id instead of a broken url when no source exists", () => {
+    // 返回 `https://` 会被下游当成一个合法地址，比空 id 更糟
+    expect(decodeMedia({
+      content_type: "file",
+      filename: "a.bin",
+      url: ""
+    })).toEqual({ kind: "id", id: "" })
+  })
+})
+
+describe("normalizeUrl", () => {
+  it("only prepends the scheme when one is missing", () => {
+    expect(normalizeUrl("https://a.test/x")).toBe("https://a.test/x")
+    expect(normalizeUrl("http://a.test/x")).toBe("http://a.test/x")
+    expect(normalizeUrl("a.test/x")).toBe("https://a.test/x")
+  })
+})
 
 describe("media helpers", () => {
   it("infers QQ media types from names and MIME types", () => {

@@ -5,6 +5,30 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-10-01
+
+本次补齐引用消息的解析，并把入站媒体的解码收敛到媒体模块。
+
+### 新增
+
+- **引用消息解析（群聊 / C2C）。** 此前收到引用消息只能拿到一条普通文本，被引用的原文完全丢失。
+  现按平台约定解析：`message_type=103` 表示引用消息，被引消息的索引在 `message_scene.ext` 的
+  `ref_msg_idx`，原文则**内联**在 `msg_elements[]` 中（回退 `parallel_message.msg_nodes[]`）；
+  适配器将其还原为消息段填入 `e.quote`，插件可直接读取被引正文、发送者与时间。频道与频道私信
+  场景平台只下发 `message_reference.message_id`，正文需另调接口，故仅填 ID。
+
+### 变更
+
+- **入站媒体解码收敛到媒体模块。** 新增 `media.decodeMedia()`，把「QQ 附件 → `MediaRef`」的判定
+  集中到一处：`url` 优先，语音附件的 `voice_wav_url` 兜底，两者都缺时返回空 `id`，不再拼出
+  `https://` 这类残缺地址。`codec.decodeMessage()` 不再就地拼 URL，`normalizeUrl()` 也由
+  `codec.ts` 移入 `media.ts`。
+
+### 修复
+
+- **补全语音附件字段。** `Attachment` 此前完全丢弃 `voice_wav_url`（语音转码后的 WAV 直链）与
+  `asr_refer_text`（平台侧 ASR 参考文本），现纳入类型定义；平台下发时一并出现在附件详情日志中。
+
 ## [0.3.1] - 2026-09-18
 
 本次是收尾：账号配置在面板上按用途分组，依赖基线抬到当前内核。
@@ -91,6 +115,7 @@
 - 初始版本：QQ 官方机器人适配器，支持 WebSocket Gateway 与 Webhook 两种连接模式，
   覆盖群聊、C2C 私聊、频道、频道私信四大场景。
 
+[0.3.2]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Yunzai-NG/adapter-qqbot/releases/tag/v0.2.0

@@ -14,8 +14,11 @@ QQ 事件清单以官方文档为准（bot.q.qq.com 事件列表）。共映射 
 | `guild` | `AT_MESSAGE_CREATE` / `MESSAGE_CREATE` | ✅ 映射 `seq`（取 `seq_in_channel`） |
 | `private`（direct） | `DIRECT_MESSAGE_CREATE` | ✅ |
 
-字段级半完成：群 `sender.role` 恒 `"member"`（报文无角色）；
-`quote` 四场景均不解析（识图类指令拿不到引用里的图）。
+引用（`quote`）：群 / C2C 已完整解析——被引正文由平台内联在 `msg_elements`，索引在
+`message_scene.ext` 的 `ref_msg_idx`，故 `quote.message` 有值，`e.images` 能计入被引用的图；
+频道 / 频道私信只有 `message_reference.message_id`，正文需另调频道消息接口，`quote.message` 留空。
+
+字段级半完成：群 `sender.role` 恒 `"member"`（报文无角色）。
 
 ## 通知（强类型 6 种 + GenericNotice）
 
@@ -67,10 +70,10 @@ GenericNotice（平台特有事件）：✅ 45 种 QQ 事件已映射——好�
 
 | 类别 | ✅ | 🟡 半完成 | ⬜ 未完成 | ⛔ 无法 |
 |---|---|---|---|---|
-| 消息 | 4/4 场景（含非 @ 群消息、`seq`、C2C `subType`） | `role` 恒 member、`quote` 不解析 | — | — |
+| 消息 | 4/4 场景（含非 @ 群消息、`seq`、C2C `subType`、群/C2C 引用正文与附件） | `role` 恒 member、频道引用只有 id 无正文 | — | — |
 | 通知 | `group.increase/decrease` 强类型对齐；45 种 GenericNotice（含公域论坛、语音子频道进出、互动应答 API） | `message.recall`（频道已适配未对齐强类型，群聊/C2C 无推送） | — | `group.admin`、`group.mute`、`poke` |
 | 请求 | `group.add` / `group.invite` | — | — | `friend` |
 | 元 | — | — | —（非必需） | —（已被覆盖） |
 
 剩余可选优化：① `message.recall` 对齐强类型（需内核 `RecallNotice` 增补 `channelId`）
-② 引用消息 `quote` 解析（识图类指令）③ 群消息发送者角色 `sender.role`（报文暂无）。
+② 频道 / 频道私信引用的正文补全（需另调频道消息接口）③ 群消息发送者角色 `sender.role`（报文暂无）。

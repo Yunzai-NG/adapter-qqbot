@@ -34,12 +34,12 @@ import {
   mapGroupRole,
   mapGuildRole
 } from "./codec.js"
-import { decodeEvent } from "./events.js"
+import { decodeEvent, describeAttachments, describeQuote } from "./events.js"
 import type { QQBotAccount } from "./config.js"
 import { TokenManager } from "./auth.js"
 import { ApiClient } from "./api.js"
 import { Gateway } from "./gateway.js"
-import type { ReadyData, SendMessageRequest, SendMessageResponse, WSPayload } from "./types.js"
+import type { Attachment, ReadyData, SendMessageRequest, SendMessageResponse, WSPayload } from "./types.js"
 import { resolveMedia } from "./media.js"
 import { markdownImage } from "./markdown.js"
 import { getImageSize } from "./image-size.js"
@@ -198,9 +198,30 @@ export function createQQBotBot(
       }
     }
 
-    const event = decodeEvent(eventType, data)
+    const event = decodeEvent(eventType, data, host.logger)
     if (event) {
       if (event.kind === "message") {
+        const where = event.scene === "group"
+          ? `群 ${event.group?.gid ?? "?"}`
+          : event.scene === "guild"
+            ? `频道 ${event.channel?.channelId ?? "?"}`
+            : `私聊 ${event.sender.uid}`
+        const who = `${event.sender.name ?? ""}(${event.sender.uid})`
+
+        // 附件详情（图片/语音/视频/文件）：平台下发的原始字段（含 id/size），
+        // 内核那行 `[图片 …]` 只给摘要，这里补齐可核对/可抓取的细节。
+        // 默认 debug 级：仅在 log.level=debug 时输出，避免刷屏
+        const attachments = (data as { attachments?: Attachment[] } | null)?.attachments
+        if (attachments?.length) {
+          host.logger.debug(`[qqbot] 附件详情 [${where}] ${who}：${describeAttachments(attachments)}`)
+        }
+
+        // 引用详情：群 / C2C 的被引正文由平台内联下发，这里确认解析结果。
+        // 默认 debug 级：仅在 log.level=debug 时输出，避免刷屏
+        if (event.quote) {
+          host.logger.debug(`[qqbot] 引用详情 [${where}] ${who}：${describeQuote(event.quote)}`)
+        }
+
         const target: SendTarget = event.scene === "group"
           ? { scene: "group", gid: event.group!.gid }
           : event.scene === "guild"

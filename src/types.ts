@@ -110,11 +110,70 @@ export interface QQUserInfo {
   head_url: string
 }
 
+/**
+ * 消息场景上下文。
+ *
+ * 群 / C2C 的引用关系不走 `message_reference`，而是塞在 `ext` 里：
+ * `msg_idx=` 当前消息索引、`ref_msg_idx=` 被引用消息索引、`auth_token=` 鉴权令牌。
+ */
+export interface MessageSceneInfo {
+  /** 场景来源，`default` = 默认聊天窗口 */
+  source?: string
+  /** 扩展数据，每项形如 `key=value` */
+  ext?: string[]
+}
+
+/** 消息元素里携带的发送者；字段随场景而异，一律可选 */
+export interface MsgAuthor {
+  id?: string
+  username?: string
+  avatar?: string
+  bot?: boolean
+  /** 群成员 openid */
+  member_openid?: string
+  /** 单聊用户 openid */
+  user_openid?: string
+  /** 跨应用统一 openid */
+  union_openid?: string
+  /** 群内角色：member / admin / owner */
+  member_role?: string
+}
+
+/**
+ * 消息元素。
+ *
+ * `message_type=103`（引用消息）时，被引消息的正文会内联在这里 —— 无需额外请求即可取到，
+ * 这正是 `e.images` 能识别「被引用的图片」的数据来源。
+ */
+export interface MsgElement {
+  /** 该元素对应的被引用消息索引 */
+  msg_idx?: string
+  /** 该元素对应的消息发送者 */
+  author?: MsgAuthor
+  /** 0=普通文本 3=结构化卡片 101=并行消息 102=聊天记录 103=引用消息 */
+  message_type?: number
+  /** 消息正文 */
+  content?: string
+  /** 该元素携带的附件 */
+  attachments?: Attachment[]
+  /** 结构化卡片数据（message_type=3 时有值） */
+  ark_data?: Record<string, unknown>
+  /** 嵌套消息元素列表（递归结构） */
+  msg_elements?: MsgElement[]
+}
+
+/** 并行消息节点 */
+export interface MsgNode {
+  content?: string
+  message_type?: number
+}
+
 /** 群消息事件 */
 export interface GroupMessageEvent {
   id: string
   group_openid: string
-  content: string
+  /** 纯附件消息（图片/语音/视频单发）平台不下发该字段 */
+  content?: string
   timestamp: string
   message_reference?: { message_id: string }
   author: {
@@ -124,6 +183,18 @@ export interface GroupMessageEvent {
     role?: "owner" | "admin" | "member"
   }
   attachments?: Attachment[]
+  /** 消息内容类型：0=普通文本 3=卡片 101=并行消息 102=聊天记录 103=引用消息 */
+  message_type?: number
+  /** 消息场景上下文（引用场景下含 `ref_msg_idx`） */
+  message_scene?: MessageSceneInfo
+  /** 消息元素列表；引用场景下即被引消息的内容 */
+  msg_elements?: MsgElement[]
+  /** 并行消息节点（部分引用场景随报文一同下发） */
+  parallel_message?: { msg_nodes?: MsgNode[] }
+  /** 消息中 @ 的用户（不含机器人自身） */
+  mentions?: MsgAuthor[]
+  /** 结构化卡片消息数据 */
+  ark_data?: Record<string, unknown>
 }
 
 /** C2C 消息事件 */
@@ -134,10 +205,23 @@ export interface C2CMessageEvent {
     username: string
     avatar: string
   }
-  content: string
+  /** 纯附件消息（图片/语音/视频单发）平台不下发该字段 */
+  content?: string
   timestamp: string
   message_reference?: { message_id: string }
   attachments?: Attachment[]
+  /** 消息内容类型：0=普通文本 3=卡片 101=并行消息 102=聊天记录 103=引用消息 */
+  message_type?: number
+  /** 消息场景上下文（引用场景下含 `ref_msg_idx`） */
+  message_scene?: MessageSceneInfo
+  /** 消息元素列表；引用场景下即被引消息的内容 */
+  msg_elements?: MsgElement[]
+  /** 并行消息节点（部分引用场景随报文一同下发） */
+  parallel_message?: { msg_nodes?: MsgNode[] }
+  /** 消息中 @ 的用户（不含机器人自身） */
+  mentions?: MsgAuthor[]
+  /** 结构化卡片消息数据 */
+  ark_data?: Record<string, unknown>
 }
 
 /** 频道消息事件（AT_MESSAGE_CREATE） */
@@ -145,7 +229,8 @@ export interface GuildMessageEvent {
   id: string
   channel_id: string
   guild_id: string
-  content: string
+  /** 纯附件消息（图片/语音/视频单发）平台不下发该字段 */
+  content?: string
   timestamp: string
   message_reference?: { message_id: string }
   author: {
@@ -167,7 +252,8 @@ export interface DirectMessageEvent {
   id: string
   channel_id: string
   guild_id: string
-  content: string
+  /** 纯附件消息（图片/语音/视频单发）平台不下发该字段 */
+  content?: string
   timestamp: string
   message_reference?: { message_id: string }
   author: {
@@ -210,6 +296,12 @@ export interface Attachment {
   height?: number
   width?: number
   size?: number
+  /** 平台侧附件 id（日志/排障用，不参与消息段构造） */
+  id?: string
+  /** 语音附件：SILK 等格式转换后的 WAV 直链（仅语音有，平台不保证下发） */
+  voice_wav_url?: string
+  /** 语音附件：平台侧的 ASR 参考识别文本（仅语音有，平台不保证下发） */
+  asr_refer_text?: string
 }
 
 /** 发送消息请求 */

@@ -9,6 +9,7 @@
  */
 import type { Segment } from "@yunzai-ng/types"
 import type { Attachment } from "./types.js"
+import { decodeMedia } from "./media.js"
 
 /** QQ Bot 消息段 */
 export interface QQBotSegment {
@@ -57,6 +58,42 @@ export function isGuildScopeId(gid: string): boolean {
   return plain.includes("-") || /^\d+$/.test(plain)
 }
 
+/**
+ * 附件 MIME / 类型标识 → 通用段类型
+ *
+ * QQ 的 `content_type` 并不总是规范 MIME：图片是 `image/jpeg`、视频是 `video/mp4`，
+ * 但**语音只给裸的 `voice`**（不带斜杠），按 MIME 前缀判断会掉进 file 分支，
+ * 于是语音消息被显示成「文件 xxx.amr」。这里把 `voice` / `audio` 一并归入 record。
+ * @param contentType 平台下发的 content_type
+ * @returns 通用段类型名
+ */
+export function classifyAttachment(contentType: string): "image" | "record" | "video" | "file" {
+  const mime = contentType.toLowerCase()
+  if (mime.startsWith("image/")) return "image"
+  if (mime.startsWith("audio/") || mime === "voice" || mime.startsWith("voice/")) return "record"
+  if (mime.startsWith("video/")) return "video"
+  return "file"
+}
+
+/**
+ * 从 `message_scene.ext` 中取出某个 `key=value` 项的值。
+ *
+ * 群 / C2C 的引用关系不走 `message_reference`：被引消息的索引塞在 ext 的 `ref_msg_idx=`，
+ * 当前消息的索引在 `msg_idx=`，另有 `auth_token=` 鉴权令牌。这里按前缀匹配取值，
+ * 值本身可能含 `=`（如 base64 索引），故只切第一个 `=`。
+ * @param ext 平台下发的扩展数组
+ * @param key 要取的键名
+ * @returns 对应的值；键不存在时 undefined
+ */
+export function sceneExtValue(ext: readonly string[] | undefined, key: string): string | undefined {
+  if (!ext) return undefined
+  const prefix = `${key}=`
+  for (const item of ext) {
+    if (item.startsWith(prefix)) return item.slice(prefix.length)
+  }
+  return undefined
+}
+
 /** 群成员角色映射：owner / admin / member */
 export function mapGroupRole(role: string): "owner" | "admin" | "member" {
   return role === "owner" ? "owner" : role === "admin" ? "admin" : "member"
@@ -69,25 +106,27 @@ export function mapGuildRole(roles: string[]): "owner" | "admin" | "member" {
 
 /**
  * 解码 QQ Bot 消息
- * @param content 消息内容
+ * @param content 消息内容；纯附件消息（如图片单发）平台不下发该字段，此处按空串处理
  * @param attachments 附件列表
  * @param guildScope 频道场景；@提及的用户 id 加 qg_ 前缀
  * @returns 通用消息段数组
  */
 export function decodeMessage(
-  content: string,
+  content: string | undefined,
   attachments?: Attachment[],
   guildScope = false
 ): Segment[] {
   const segments: Segment[] = []
+  // 图片/语音/视频单发时平台只给 attachments，content 为 undefined；不能直接取 .length
+  const text = content ?? ""
 
   // @、@全体与 QQ 原生表情按出现位置拆开，保留其余原文。
   const tokenRegex = /<@!?(everyone|\d+)>|<emoji:(\d+)>/g
   let lastIndex = 0
   let match: RegExpExecArray | null
-  while ((match = tokenRegex.exec(content)) !== null) {
+  while ((match = tokenRegex.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      segments.push({ type: "text", text: content.slice(lastIndex, match.index) })
+      segments.push({ type: "text", text: text.slice(lastIndex, match.index) })
     }
     if (match[1] === "everyone") {
       segments.push({ type: "atAll" })
@@ -98,27 +137,31 @@ export function decodeMessage(
     }
     lastIndex = match.index + match[0].length
   }
-  if (lastIndex < content.length) {
-    segments.push({ type: "text", text: content.slice(lastIndex) })
+  if (lastIndex < text.length) {
+    segments.push({ type: "text", text: text.slice(lastIndex) })
   }
 
   for (const attachment of attachments ?? []) {
-    const file = { kind: "url" as const, url: attachment.url }
-    const contentType = attachment.content_type.toLowerCase()
-    if (contentType.startsWith("image/")) {
-      segments.push({
-        type: "image",
-        file,
-        summary: attachment.filename,
-        width: attachment.width,
-        height: attachment.height
-      })
-    } else if (contentType.startsWith("audio/")) {
-      segments.push({ type: "record", file })
-    } else if (contentType.startsWith("video/")) {
-      segments.push({ type: "video", file })
-    } else {
-      segments.push({ type: "file", file, name: attachment.filename, size: attachment.size })
+    // 附件 → MediaRef 的优先级链集中在 media.decodeMedia，此处不再就地拼 URL
+    const file = decodeMedia(attachment)
+    switch (classifyAttachment(attachment.content_type)) {
+      case "image":
+        segments.push({
+          type: "image",
+          file,
+          summary: attachment.filename,
+          width: attachment.width,
+          height: attachment.height
+        })
+        break
+      case "record":
+        segments.push({ type: "record", file })
+        break
+      case "video":
+        segments.push({ type: "video", file })
+        break
+      default:
+        segments.push({ type: "file", file, name: attachment.filename, size: attachment.size })
     }
   }
 
