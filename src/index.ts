@@ -25,9 +25,8 @@ export { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-regi
 
 /** 插件定义 */
 const plugin: PluginDefinition<Record<string, never>> = definePlugin({
+  // 版本与说明取 package.json；name 留着，省掉要内核 0.6.5
   name: "adapter-qqbot",
-  version: "0.3.2",
-  description: "QQ Bot 官方机器人适配器：WebSocket Gateway / Webhook 双模式",
   priority: 10,
 
   setup(ctx) {

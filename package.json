@@ -6,6 +6,7 @@
   "private": true,
   "license": "AGPL-3.0-or-later",
   "author": "Yunzai-NG",
+  "homepage": "https://github.com/Yunzai-NG/adapter-qqbot",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

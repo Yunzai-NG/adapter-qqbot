@@ -5,6 +5,13 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 变更
+
+- 入口不再写 `version` 与 `description`，一律取 package.json，发版只改那一处；package.json 补上
+  `homepage`，面板插件页由此有了「访问仓库」。`name` 仍写在入口里：省掉它要内核 0.6.5。
+
 ## [0.3.2] - 2026-10-01
 
 本次补齐引用消息的解析，并把入站媒体的解码收敛到媒体模块。
