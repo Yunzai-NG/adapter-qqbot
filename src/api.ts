@@ -27,7 +27,12 @@ import type {
   GuildMemberInfo,
   GroupInfo,
   GuildInfo,
-  ChannelInfo
+  ChannelInfo,
+  MediaImagePrepareRequest,
+  MediaImagePrepareResponse,
+  MediaImageCompleteRequest,
+  MediaImageCompleteResponse,
+  MediaImageListResponse
 } from "./types.js"
 
 
@@ -345,6 +350,44 @@ export class ApiClient {
       `/v2/${target}s/${targetId}/files`,
       request
     )
+  }
+
+  /**
+   * 官方素材库：申请图片上传，换取 upload_id 与预签名直传地址
+   * @param request 文件名、大小、MIME 与摘要
+   * @returns upload_id、presigned_url 与有效期
+   */
+  async prepareImageUpload(request: MediaImagePrepareRequest): Promise<MediaImagePrepareResponse> {
+    return this.call<MediaImagePrepareResponse>("POST", "/v2/media-images/prepare", request)
+  }
+
+  /**
+   * 官方素材库：完成图片上传，换取 `qqbot-media://` 引用
+   * @param request upload_id 与文件 MD5
+   * @returns image_id、Markdown 引用链接与滑动有效期
+   */
+  async completeImageUpload(request: MediaImageCompleteRequest): Promise<MediaImageCompleteResponse> {
+    return this.call<MediaImageCompleteResponse>("POST", "/v2/media-images/complete", request)
+  }
+
+  /**
+   * 官方素材库：查询当前机器人的有效图片（按上传时间倒序）
+   * @param cursor 翻页游标，首页不传
+   * @returns 图片列表、下一页游标与总数
+   */
+  async listMediaImages(cursor?: string): Promise<MediaImageListResponse> {
+    const path = cursor
+      ? `/v2/media-images?cursor=${encodeURIComponent(cursor)}`
+      : "/v2/media-images"
+    return this.call<MediaImageListResponse>("GET", path)
+  }
+
+  /**
+   * 官方素材库：删除指定图片，释放数量配额
+   * @param imageId 图片 ID
+   */
+  async deleteMediaImage(imageId: string): Promise<void> {
+    await this.call("DELETE", `/v2/media-images/${encodeURIComponent(imageId)}/delete`)
   }
 
   /** 发送频道消息 */

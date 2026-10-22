@@ -50,6 +50,39 @@ describe("decodeMessage", () => {
     ])
   })
 
+  it("splits openid mentions out of the text so prefix commands still match", () => {
+    // 实测报文：群聊 @机器人 下发 `<@大写openid>`（不带斜杠），旧正则只认 \d+ 导致整段留在正文
+    expect(decodeMessage("<@5519A1A02E6BBE79C222FA4611115C66> #消息测试")).toEqual([
+      { type: "at", uid: "5519A1A02E6BBE79C222FA4611115C66" },
+      { type: "text", text: " #消息测试" }
+    ])
+
+    // 客户端展示的斜杠写法同样兼容
+    expect(decodeMessage("<@//5519a1a02e6bbe79c222fa4611115c66/> #消息测试")).toEqual([
+      { type: "at", uid: "5519a1a02e6bbe79c222fa4611115c66" },
+      { type: "text", text: " #消息测试" }
+    ])
+
+    expect(decodeMessage("<@!//5519a1a02e6bbe79c222fa4611115c66/>hi")).toEqual([
+      { type: "at", uid: "5519a1a02e6bbe79c222fa4611115c66" },
+      { type: "text", text: "hi" }
+    ])
+
+    // 单斜杠写法同样识别，正文里不该残留 `<@`
+    expect(decodeMessage("<@/abc123/> #ping")).toEqual([
+      { type: "at", uid: "abc123" },
+      { type: "text", text: " #ping" }
+    ])
+  })
+
+  it("keeps an emoji token working next to an openid mention", () => {
+    expect(decodeMessage("<@5519A1A02E6BBE79C222FA4611115C66> hi <emoji:66>")).toEqual([
+      { type: "at", uid: "5519A1A02E6BBE79C222FA4611115C66" },
+      { type: "text", text: " hi " },
+      { type: "face", id: 66 }
+    ])
+  })
+
   it("handles image-only messages where the platform omits content", () => {
     expect(decodeMessage(undefined, [
       { content_type: "image/png", filename: "a.png", url: "https://example.test/a.png", width: 774, height: 476 }
@@ -100,6 +133,70 @@ describe("decodeMessage", () => {
       { content_type: "video/mp4", filename: "v.mp4", url: "https://e.test/v.mp4", size: 3905543 }
     ])).toEqual([
       { type: "video", file: { kind: "url", url: "https://e.test/v.mp4" } }
+    ])
+  })
+})
+
+describe("decodeMessage 自身提及归一化", () => {
+  const OPENID = "5519A1A02E6BBE79C222FA4611115C66"
+  const SELF = "2854196810"
+
+  it("把 mentions 里 is_you 的 @ 换成 selfId，核心的 atMe 才能成立", () => {
+    // 实测报文：content 用 openid，mentions 里 is_you=true，selfId 是真实 QQ 号。
+    // 不归一化时 at.uid 与 selfId 永不相等，群聊 e.atMe 恒为 false
+    expect(decodeMessage(`<@${OPENID}> #消息测试`, undefined, false, {
+      selfId: SELF,
+      selfMentions: [OPENID]
+    })).toEqual([
+      { type: "at", uid: SELF },
+      { type: "text", text: " #消息测试" }
+    ])
+  })
+
+  it("斜杠写法的自身提及同样归一化", () => {
+    expect(decodeMessage(`<@//${OPENID}/> #ping`, undefined, false, {
+      selfId: SELF,
+      selfMentions: [OPENID]
+    })).toEqual([
+      { type: "at", uid: SELF },
+      { type: "text", text: " #ping" }
+    ])
+  })
+
+  it("别人的提及保持平台原始 id，不与 selfId 混用", () => {
+    const other = "FF23DED2F67B06F46C7A23AE9BB7C5AE"
+    expect(decodeMessage(`<@${OPENID}> <@${other}> hi`, undefined, false, {
+      selfId: SELF,
+      selfMentions: [OPENID]
+    })).toEqual([
+      { type: "at", uid: SELF },
+      { type: "text", text: " " },
+      { type: "at", uid: other },
+      { type: "text", text: " hi" }
+    ])
+  })
+
+  it("频道场景下自身提及不加 qg_ 前缀，否则与 selfId 不等", () => {
+    expect(decodeMessage(`<@${OPENID}> hi`, undefined, true, {
+      selfId: SELF,
+      selfMentions: [OPENID]
+    })).toEqual([
+      { type: "at", uid: SELF },
+      { type: "text", text: " hi" }
+    ])
+  })
+
+  it("未提供 selfId 时退回原始行为，不影响只做解析的调用方", () => {
+    expect(decodeMessage(`<@${OPENID}> hi`)).toEqual([
+      { type: "at", uid: OPENID },
+      { type: "text", text: " hi" }
+    ])
+  })
+
+  it("selfMentions 为空时不做任何替换", () => {
+    expect(decodeMessage(`<@${OPENID}> hi`, undefined, false, { selfId: SELF })).toEqual([
+      { type: "at", uid: OPENID },
+      { type: "text", text: " hi" }
     ])
   })
 })

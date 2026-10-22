@@ -19,7 +19,8 @@ import type {
   MemberInfo,
   Logger
 } from "@yunzai-ng/types"
-import { decodeMessage, addGuildPrefix, classifyAttachment, sceneExtValue } from "./codec.js"
+import { decodeMessage, addGuildPrefix, classifyAttachment, sceneExtValue, selfIdsOf } from "./codec.js"
+import type { DecodeOptions } from "./codec.js"
 import { normalizeUrl } from "./media.js"
 import type {
   Attachment,
@@ -28,6 +29,7 @@ import type {
   GuildMessageEvent,
   DirectMessageEvent,
   MessageSceneInfo,
+  MsgAuthor,
   MsgElement,
   MsgNode
 } from "./types.js"
@@ -39,6 +41,23 @@ function stringifyRaw(data: unknown): string {
   } catch {
     return String(data)
   }
+}
+
+/**
+ * 组装解码选项
+ *
+ * `mentions` 总要带上：它既用来识别机器人自己，也用来给 `at` 段补展示名。
+ * @param selfId 适配器认定的自身 id（真实 QQ 号）
+ * @param mentions 报文 `mentions` 字段
+ * @returns 解码选项
+ */
+function decodeOptions(selfId?: string, mentions?: readonly MsgAuthor[]): DecodeOptions {
+  const options: DecodeOptions = { mentions }
+  if (selfId) {
+    options.selfId = selfId
+    options.selfMentions = selfIdsOf(mentions)
+  }
+  return options
 }
 
 /**
@@ -83,7 +102,7 @@ function describeSegments(segments: readonly Segment[]): string {
     .map(segment => {
       switch (segment.type) {
         case "text": return segment.text
-        case "at": return `@${segment.uid}`
+        case "at": return `@${segment.name ?? segment.uid}`
         case "atAll": return "@全体"
         case "face": return `[表情${segment.id}]`
         case "image": return `[图片${segment.summary ? ` ${segment.summary}` : ""}]`
@@ -117,23 +136,29 @@ export function describeQuote(quote?: QuoteInfo): string {
  * @param eventType 事件类型
  * @param data 事件数据
  * @param logger 可选日志器；传入时在入口打印平台下发的原始事件
+ * @param selfId 适配器认定的自身 id；传入后机器人自己的 @ 会换成该 id，`e.atMe` 才成立
  * @returns 内核事件；无法处理时 undefined
  */
-export function decodeEvent(eventType: string, data: unknown, logger?: Logger): IncomingEvent | undefined {
+export function decodeEvent(
+  eventType: string,
+  data: unknown,
+  logger?: Logger,
+  selfId?: string
+): IncomingEvent | undefined {
   logger?.debug(`[qqbot] 收到平台事件 ${eventType}：${stringifyRaw(data)}`)
   const payload = data as Record<string, any>
   switch (eventType) {
     // ── 消息事件 ──
     case "GROUP_AT_MESSAGE_CREATE":
     case "GROUP_MESSAGE_CREATE":
-      return decodeGroupMessage(data as GroupMessageEvent)
+      return decodeGroupMessage(data as GroupMessageEvent, selfId)
     case "C2C_MESSAGE_CREATE":
-      return decodeC2CMessage(data as C2CMessageEvent)
+      return decodeC2CMessage(data as C2CMessageEvent, selfId)
     case "AT_MESSAGE_CREATE":
     case "MESSAGE_CREATE":
-      return decodeGuildMessage(data as GuildMessageEvent)
+      return decodeGuildMessage(data as GuildMessageEvent, selfId)
     case "DIRECT_MESSAGE_CREATE":
-      return decodeDirectMessage(data as DirectMessageEvent)
+      return decodeDirectMessage(data as DirectMessageEvent, selfId)
 
     // ── 好友（C2C）事件 ──
     case "FRIEND_ADD":
@@ -454,8 +479,13 @@ function buildQuote(source: QuoteSource, guildScope = false): QuoteInfo | undefi
 
 // ── 消息事件解析 ──
 
-function decodeGroupMessage(data: GroupMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments)
+/**
+ * 解析群消息
+ * @param data 群消息报文
+ * @returns 内核消息事件
+ */
+function decodeGroupMessage(data: GroupMessageEvent, selfId?: string): IncomingMessageEvent {
+  const message = decodeMessage(data.content, data.attachments, false, decodeOptions(selfId, data.mentions))
   return {
     kind: "message",
     scene: "group",
@@ -475,8 +505,13 @@ function decodeGroupMessage(data: GroupMessageEvent): IncomingMessageEvent {
   }
 }
 
-function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments)
+/**
+ * 解析 C2C 消息
+ * @param data 单聊消息报文
+ * @returns 内核消息事件
+ */
+function decodeC2CMessage(data: C2CMessageEvent, selfId?: string): IncomingMessageEvent {
+  const message = decodeMessage(data.content, data.attachments, false, decodeOptions(selfId, data.mentions))
   return {
     kind: "message",
     scene: "private",
@@ -494,8 +529,13 @@ function decodeC2CMessage(data: C2CMessageEvent): IncomingMessageEvent {
   }
 }
 
-function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments, true)
+/**
+ * 解析频道消息
+ * @param data 频道消息报文
+ * @returns 内核消息事件
+ */
+function decodeGuildMessage(data: GuildMessageEvent, selfId?: string): IncomingMessageEvent {
+  const message = decodeMessage(data.content, data.attachments, true, decodeOptions(selfId, data.mentions))
   return {
     kind: "message",
     scene: "guild",
@@ -519,8 +559,13 @@ function decodeGuildMessage(data: GuildMessageEvent): IncomingMessageEvent {
   }
 }
 
-function decodeDirectMessage(data: DirectMessageEvent): IncomingMessageEvent {
-  const message = decodeMessage(data.content, data.attachments, true)
+/**
+ * 解析频道私信
+ * @param data 频道私信报文
+ * @returns 内核消息事件
+ */
+function decodeDirectMessage(data: DirectMessageEvent, selfId?: string): IncomingMessageEvent {
+  const message = decodeMessage(data.content, data.attachments, true, decodeOptions(selfId, data.mentions))
   return {
     kind: "message",
     scene: "private",

@@ -170,6 +170,60 @@ export const ACCOUNT_SCHEMA = s.object({
     .group("消息")
     .order(22),
 
+  imageHostType: s
+    .select([
+      {
+        value: "framework",
+        label: "框架图床",
+        description: "用框架内置文件服务把图片发布为临时公网链接，需要公网可达的地址"
+      },
+      {
+        value: "official",
+        label: "官方图床",
+        description: "上传到 QQ 素材库换取 qqbot-media:// 引用，无需公网地址，单机器人上限 100 张"
+      },
+      {
+        value: "external",
+        label: "外置图床",
+        description: "调用自定义 JS 脚本上传到自己的图床，返回公网 URL"
+      }
+    ])
+    .default("framework")
+    .title("图床类型")
+    .desc("Markdown 消息里图片的公网通道。切换后下方只显示该通道需要的配置项")
+    .group("图片")
+    .order(14),
+
+  serverAddress: s
+    .string()
+    .default("")
+    .title("文件服务地址")
+    .desc("把渲染图片转公网 URL 供 Markdown 引用。填核心面板的公网地址（如 http://192.168.1.2:2536 或穿透域名），留空则用内核面板地址")
+    .showWhen({ imageHostType: ["framework"] })
+    .group("图片")
+    .placeholder("http://地址:端口 或 https://穿透域名")
+    .order(16),
+
+  imageHostScript: s
+    .string()
+    .default("")
+    .title("图床脚本路径")
+    .desc("自定义图床 JS 脚本路径，脚本需 export default 一个函数，接收图片数据返回公网 URL。用于在 Markdown 消息中发送图片")
+    .showWhen({ imageHostType: ["external"] })
+    .group("图片")
+    .order(17),
+
+  imageSaveSeconds: s
+    .number()
+    .default(14400)
+    .min(60)
+    .max(7776000)
+    .title("图片保存时间（秒）")
+    .desc("官方上传任务 4 小时（14400 秒）后自动过期，超过该时长会重新上传；适配器也会按该时间定时清理素材库里的旧图，配额满时同样触发。清理只释放配额，不影响已发送的消息。图片引用本身是滑动过期：被消息引用即顺延，90 天（7776000 秒）未被引用才失效")
+    .showWhen({ imageHostType: ["official"] })
+    .group("图片")
+    .order(18),
+
   imageMaxSizeMb: s
     .number()
     .default(4)
@@ -178,23 +232,6 @@ export const ACCOUNT_SCHEMA = s.object({
     .desc("sharp 可用时将超限图片压缩；未安装则原样发送")
     .group("图片")
     .order(19),
-
-  imageHostScript: s
-    .string()
-    .default("")
-    .title("图床脚本路径")
-    .desc("自定义图床 JS 脚本路径，脚本需 export default 一个函数，接收图片数据返回公网 URL。用于在 Markdown 消息中发送图片")
-    .group("图片")
-    .order(15),
-
-  serverAddress: s
-    .string()
-    .default("")
-    .title("文件服务地址")
-    .desc("把渲染图片转公网 URL 供 Markdown 引用。填核心面板的公网地址（如 http://192.168.1.2:2536 或穿透域名），留空则用内核面板地址。与图床脚本二选一，脚本优先")
-    .group("图片")
-    .placeholder("http://地址:端口 或 https://穿透域名")
-    .order(21),
 
   listenPath: s
     .string()
@@ -222,7 +259,14 @@ export function validateAccount(input: unknown): QQBotAccount {
     return input as QQBotAccount
   }
 
-  const account = ACCOUNT_SCHEMA.parse(input)
+  // 旧配置没有图床类型：填过脚本的按外置图床迁移，其余保持框架图床
+  const source: Record<string, unknown> = { ...inputObj }
+  if (source.imageHostType === undefined) {
+    const script = typeof source.imageHostScript === "string" ? source.imageHostScript.trim() : ""
+    source.imageHostType = script ? "external" : "framework"
+  }
+
+  const account = ACCOUNT_SCHEMA.parse(source)
   const issues: SchemaIssue[] = []
 
   if (!account.appId.trim()) {
@@ -268,13 +312,16 @@ export function validateAccount(input: unknown): QQBotAccount {
     }
   }
 
-  const serverAddress = account.serverAddress.trim()
-  if (serverAddress && !/^https?:\/\//i.test(serverAddress)) {
-    issues.push({
-      path: "serverAddress",
-      message: "文件服务地址应以 http:// 或 https:// 开头",
-      severity: "error"
-    })
+  // 文件服务地址只在框架图床下生效，隐藏字段里的历史值不参与校验
+  if (account.imageHostType === "framework") {
+    const serverAddress = account.serverAddress.trim()
+    if (serverAddress && !/^https?:\/\//i.test(serverAddress)) {
+      issues.push({
+        path: "serverAddress",
+        message: "文件服务地址应以 http:// 或 https:// 开头",
+        severity: "error"
+      })
+    }
   }
 
   if (issues.length > 0) throw new SchemaError(issues)

@@ -46,6 +46,7 @@ import { getImageSize } from "./image-size.js"
 import { buildOutbound, type OutboundMessage } from "./outbound.js"
 import { MediaUploader } from "./upload.js"
 import { ImageHost } from "./image-host.js"
+import { OfficialImageHost, normalizeSaveSeconds, sweepIntervalMs } from "./official-image-host.js"
 import { fileUrl, publishFile } from "./file-server.js"
 import { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-registry.js"
 import { Ed25519 } from "./ed25519.js"
@@ -53,6 +54,31 @@ import { Ed25519 } from "./ed25519.js"
 const SHARE_INFO_URL = "https://qun.qq.com/cgi-bin/group_pro/robot/manager/share_info"
 /** share_info 接口固定的 bkn 参数 */
 const SHARE_INFO_BKN = 508459323
+
+/**
+ * 把参数对象拼成查询串（GET / DELETE 用）
+ * @param params 调用参数
+ * @returns 形如 `cursor=abc&limit=10` 的查询串；无有效参数时为空串
+ */
+function toQueryString(params?: Record<string, unknown>): string {
+  if (!params) return ""
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue
+    search.set(key, String(value))
+  }
+  return search.toString()
+}
+
+/**
+ * 把间隔渲染成日志友好的文案
+ * @param ms 间隔毫秒数
+ * @returns 如「1 小时」「30 分钟」
+ */
+function formatInterval(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000} 小时`
+  return `${Math.round(ms / 60_000)} 分钟`
+}
 
 /** 获取机器人真实 QQ 号 */
 async function getRobotUin(appId: string, http: HttpClient): Promise<string | null> {
@@ -117,6 +143,8 @@ export function createQQBotBot(
   const tokenManager = new TokenManager(account, deps.http, host.logger)
   const api = new ApiClient(tokenManager, deps.http, host.logger)
   const uploader = new MediaUploader(api, deps.http, host.logger)
+  // 官方图床：按账号一个实例，本地去重缓存随进程存活
+  const officialImageHost = new OfficialImageHost(api, deps.http, host.logger, account.imageSaveSeconds)
 
   function resolveSelfId(fallback: string): Promise<string> {
     if (account.robotUin) return Promise.resolve(account.robotUin)
@@ -198,7 +226,9 @@ export function createQQBotBot(
       }
     }
 
-    const event = decodeEvent(eventType, data, host.logger)
+    // selfId 必须传：报文里 @ 机器人用的是 openid，核心的 atMe 却拿 at.uid 与真实 QQ 号比较，
+    // 不归一化则群聊 / 频道里 e.atMe 恒为 false
+    const event = decodeEvent(eventType, data, host.logger, selfId)
     if (event) {
       if (event.kind === "message") {
         const where = event.scene === "group"
@@ -369,36 +399,112 @@ export function createQQBotBot(
 
   /** 单张图片转公网 URL 的结果 */
   interface ConvertedImage {
-    /** 公网 URL */
+    /** 公网 URL（官方图床为 qqbot-media:// 引用） */
     url: string
     /** 实测宽高（Markdown 图片描述符需要） */
     size?: { width: number; height: number }
   }
 
-  /** 单张图片转公网 URL：图床脚本优先，失败或未配置时降级内置 file 路由 */
+  /** 当前生效的图床通道；旧配置没有该字段时按脚本有无推断 */
+  function resolveImageChannel(): "framework" | "official" | "external" {
+    if (account.imageHostType === "official" || account.imageHostType === "external") return account.imageHostType
+    if (!account.imageHostType && account.imageHostScript.trim()) return "external"
+    return "framework"
+  }
+
+  /**
+   * 单张图片转公网 URL：按图床类型走对应通道，失败降级框架文件服务
+   *
+   * 官方图床返回 `qqbot-media://` 引用，同样能写进 Markdown；三条通道都不可用时
+   * 图片降级为文本占位并告警。
+   */
   async function convertMarkdownImage(segment: Extract<Segment, { type: "image" }>): Promise<ConvertedImage | undefined> {
     try {
       const resolved = await resolveMedia(segment.file, deps.http)
       const size = getImageSize(resolved.buffer) ?? undefined
-      if (imageHost.enabled) {
+      const channel = resolveImageChannel()
+
+      if (channel === "external" && imageHost.enabled) {
         const url = await imageHost.upload(resolved.buffer, {
           filename: resolved.fileName,
           mimeType: resolved.mime
         })
         if (url) return { url, size }
-        host.logger.warn("[qqbot] 图床上传失败，降级内置文件路由")
+        host.logger.warn("[qqbot] 外置图床上传失败，降级框架文件服务")
       }
+
+      if (channel === "official") {
+        const url = await officialImageHost.upload(resolved.buffer, {
+          filename: resolved.fileName,
+          mime: resolved.mime
+        })
+        if (url) return { url, size }
+        host.logger.warn("[qqbot] 官方图床上传失败，降级框架文件服务")
+      }
+
       const baseUrl = resolveFileBaseUrl()
       if (baseUrl) {
         return { url: fileUrl(baseUrl, publishFile(resolved.buffer, resolved.mime)), size }
       }
-      host.logger.warn("[qqbot] 无可用图片公网通道（图床脚本与文件服务地址均未配置），图片已降级为文本")
+      host.logger.warn(`[qqbot] 图床通道（${channel}）不可用且无文件服务地址，图片已降级为文本`)
       return undefined
     } catch (err) {
       host.logger.warn(`[qqbot] Markdown 图片处理失败，已降级为文本：${err instanceof Error ? err.message : String(err)}`)
       return undefined
     }
   }
+  /** 官方素材定时清理的计时器 */
+  let sweepTimer: ReturnType<typeof setInterval> | undefined
+  /** 首轮清理的一次性计时器 */
+  let sweepKickoff: ReturnType<typeof setTimeout> | undefined
+  /** 正在清理：避免上一轮没跑完又叠一轮 */
+  let sweeping = false
+
+  /** 停掉定时清理（重复调用安全） */
+  function stopImageSweep(): void {
+    if (sweepTimer !== undefined) {
+      clearInterval(sweepTimer)
+      sweepTimer = undefined
+    }
+    if (sweepKickoff !== undefined) {
+      clearTimeout(sweepKickoff)
+      sweepKickoff = undefined
+    }
+  }
+
+  /** 跑一轮清理：删除超过保存时间的旧素材，释放配额 */
+  async function runImageSweep(): Promise<void> {
+    if (sweeping) return
+    sweeping = true
+    try {
+      const removed = await officialImageHost.sweep()
+      if (removed > 0) host.logger.info(`[qqbot] 官方素材定时清理：释放 ${removed} 张超过保存时间的旧图`)
+    } catch (err) {
+      host.logger.warn(`[qqbot] 官方素材定时清理失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      sweeping = false
+    }
+  }
+
+  /**
+   * 启动官方素材的定时清理
+   *
+   * 只在「官方图床」通道下启用：发图量大的机器人容易把 100 张配额塞满，
+   * 与其等上传失败再临时清理，不如按保存时间滚动释放。连接后先补跑一轮，
+   * 把停机期间积攒的旧图清掉。
+   */
+  function startImageSweep(): void {
+    stopImageSweep()
+    if (resolveImageChannel() !== "official") return
+
+    const intervalMs = sweepIntervalMs(account.imageSaveSeconds)
+    sweepTimer = setInterval(() => { void runImageSweep() }, intervalMs)
+    sweepTimer.unref?.()
+    sweepKickoff = setTimeout(() => { void runImageSweep() }, 30_000)
+    sweepKickoff.unref?.()
+    host.logger.info(`[qqbot] 官方素材定时清理已启用：每 ${formatInterval(intervalMs)}检查一次`)
+  }
+
   const driver: BotDriver = {
     platform: PLATFORM,
     adapterId: deps.adapterId,
@@ -418,17 +524,28 @@ export function createQQBotBot(
       // 连接前先确定 selfId（真实 QQ 号），获取失败则保持当前值
       selfId = await resolveSelfId(selfId)
 
-      // 初始化图床
-      if (account.imageHostScript) {
-        await imageHost.load(account.imageHostScript, host.logger)
+      // 初始化图床：只有外置图床需要加载脚本
+      const imageChannel = resolveImageChannel()
+      if (imageChannel === "external") {
+        if (account.imageHostScript.trim()) {
+          await imageHost.load(account.imageHostScript, host.logger)
+        } else {
+          host.logger.warn("[qqbot] 图床类型为外置图床但未填脚本路径，Markdown 图片将降级为框架文件服务")
+        }
       }
 
-      // 无图床脚本时 Markdown 图片依赖文件路由；回环地址 QQ 拉不到，提前提醒
-      if (!imageHost.enabled && (account.groupMarkdown || account.guildMarkdown)) {
+      // 框架图床依赖文件路由；回环地址 QQ 拉不到，提前提醒
+      if (imageChannel === "framework" && (account.groupMarkdown || account.guildMarkdown)) {
         const base = resolveFileBaseUrl()
         if (base && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(base)) {
-          host.logger.warn(`[qqbot] 文件服务地址为回环地址（${base}），QQ 客户端可能无法拉取 Markdown 图片，请在账号配置 serverAddress 填公网地址或穿透域名`)
+          host.logger.warn(`[qqbot] 文件服务地址为回环地址（${base}），QQ 客户端可能无法拉取 Markdown 图片，请在账号配置的「文件服务地址」填公网地址或穿透域名`)
         }
+      }
+
+      if (imageChannel === "official") {
+        const saveSeconds = normalizeSaveSeconds(account.imageSaveSeconds)
+        const humanized = saveSeconds % 3600 === 0 ? `${saveSeconds / 3600} 小时` : `${Math.round(saveSeconds / 60)} 分钟`
+        host.logger.info(`[qqbot] 官方图床已启用：本地记录保留 ${saveSeconds} 秒（约 ${humanized}），单机器人上限 100 张`)
       }
 
       // 根据模式选择不同的连接方式
@@ -453,9 +570,14 @@ export function createQQBotBot(
         // WebSocket 模式：使用 Gateway 连接
         await gateway.connect()
       }
+
+      // 连上之后再启动定时清理：官方图床按保存时间滚动释放配额
+      startImageSweep()
     },
 
     async disconnect(): Promise<void> {
+      stopImageSweep()
+
       if (account.mode === "webhook") {
         // Webhook 模式：注销处理器
         unregisterWebhookHandler(account.appId)
@@ -875,6 +997,26 @@ export function createQQBotBot(
           Number(params?.code ?? 0)
         ) as Promise<T>
       }
+
+      // 插件主动删除官方素材后，同步失效本地缓存，避免继续引用已删链接（40035009）
+      if (action === "forgetOfficialImage") {
+        officialImageHost.forget(String(params?.url ?? ""))
+        return Promise.resolve(undefined as T)
+      }
+
+      // 支持 "GET /v2/media-images" 这类「方法 + 路径」写法：素材查询 / 删除需要 GET 与 DELETE，
+      // 而通用出口默认只发 POST。参数在 GET / DELETE 下拼进查询串
+      const routed = /^([A-Za-z]+)\s+(\/\S*)$/.exec(action.trim())
+      if (routed) {
+        const method = routed[1].toUpperCase()
+        const path = routed[2]
+        if (method === "GET" || method === "DELETE") {
+          const query = toQueryString(params)
+          return api.call<T>(method, query ? `${path}?${query}` : path)
+        }
+        return api.call<T>(method, path, params)
+      }
+
       return api.call<T>("POST", action, params)
     }
   }

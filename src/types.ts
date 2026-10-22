@@ -129,6 +129,8 @@ export interface MsgAuthor {
   username?: string
   avatar?: string
   bot?: boolean
+  /** 该条提及是否指向当前机器人；平台用它标明「@ 的是你」 */
+  is_you?: boolean
   /** 群成员 openid */
   member_openid?: string
   /** 单聊用户 openid */
@@ -191,7 +193,7 @@ export interface GroupMessageEvent {
   msg_elements?: MsgElement[]
   /** 并行消息节点（部分引用场景随报文一同下发） */
   parallel_message?: { msg_nodes?: MsgNode[] }
-  /** 消息中 @ 的用户（不含机器人自身） */
+  /** 消息中 @ 的用户；**包含机器人自身**，`is_you: true` 的那条就是当前机器人 */
   mentions?: MsgAuthor[]
   /** 结构化卡片消息数据 */
   ark_data?: Record<string, unknown>
@@ -218,7 +220,7 @@ export interface C2CMessageEvent {
   msg_elements?: MsgElement[]
   /** 并行消息节点（部分引用场景随报文一同下发） */
   parallel_message?: { msg_nodes?: MsgNode[] }
-  /** 消息中 @ 的用户（不含机器人自身） */
+  /** 消息中 @ 的用户；**包含机器人自身**，`is_you: true` 的那条就是当前机器人 */
   mentions?: MsgAuthor[]
   /** 结构化卡片消息数据 */
   ark_data?: Record<string, unknown>
@@ -245,6 +247,8 @@ export interface GuildMessageEvent {
   }
   attachments?: Attachment[]
   seq_in_channel?: string
+  /** 消息中 @ 的用户；**包含机器人自身**，`is_you: true` 的那条就是当前机器人 */
+  mentions?: MsgAuthor[]
 }
 
 /** 频道私信事件（DIRECT_MESSAGE_CREATE） */
@@ -263,6 +267,8 @@ export interface DirectMessageEvent {
   }
   attachments?: Attachment[]
   src_guild_id?: string
+  /** 消息中 @ 的用户；**包含机器人自身**，`is_you: true` 的那条就是当前机器人 */
+  mentions?: MsgAuthor[]
 }
 
 /** 消息审核事件 */
@@ -394,6 +400,76 @@ export interface FilesRequest {
   upload_id?: string
   file_name?: string
   srv_send_msg?: boolean
+}
+
+/** 官方素材库：申请图片上传 */
+export interface MediaImagePrepareRequest {
+  /** 文件名（含扩展名，扩展名须与 content_type 一致） */
+  file_name: string
+  /** 文件大小（字节） */
+  file_size: number
+  /** 图片 MIME：image/png / image/jpeg / image/gif / image/webp */
+  content_type: string
+  /** 文件内容 MD5（32 位十六进制） */
+  md5: string
+  /** 文件内容 SHA1（40 位十六进制） */
+  sha1: string
+}
+
+/** 官方素材库：申请图片上传的响应 */
+export interface MediaImagePrepareResponse {
+  /** 上传任务 ID，4 小时内有效 */
+  upload_id: string
+  /** 预签名直传地址 */
+  presigned_url: string
+  /** 预签名地址有效期（秒） */
+  expires_in: number
+}
+
+/** 官方素材库：完成图片上传 */
+export interface MediaImageCompleteRequest {
+  /** prepare 返回的上传任务 ID */
+  upload_id: string
+  /** 文件 MD5（与 COS 对象 ETag 比对） */
+  md5: string
+}
+
+/** 官方素材库：完成图片上传的响应 */
+export interface MediaImageCompleteResponse {
+  /** 图片 ID，用于查询与删除 */
+  image_id: string
+  /** Markdown 引用链接：qqbot-media://image/v1/<token> */
+  url: string
+  /** 滑动有效期（秒），每次被消息引用后顺延 */
+  ttl: number
+  /** 临时预览链接，仅供自查 */
+  preview_url?: string
+}
+
+/** 官方素材库：单张有效图片 */
+export interface MediaImageItem {
+  /** 图片 ID，用于删除 */
+  image_id: string
+  /** Markdown 引用链接 */
+  url: string
+  /** 上传时的文件名 */
+  file_name: string
+  /** 临时预览链接，仅供自查 */
+  preview_url?: string
+  /** 上传时间（Unix 秒） */
+  created_at: number
+  /** 过期时间（Unix 秒），每次被引用后顺延 */
+  expires_at: number
+}
+
+/** 官方素材库：查询有效图片的响应 */
+export interface MediaImageListResponse {
+  /** 图片列表，按上传时间倒序 */
+  images: MediaImageItem[]
+  /** 下一页游标，为空表示末页 */
+  next_cursor: string
+  /** 当前有效图片总数 */
+  total: number
 }
 
 /** Markdown 消息 */

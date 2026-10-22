@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { IncomingMessageEvent } from "@yunzai-ng/types"
+import { describeMessage } from "@yunzai-ng/core"
 import { decodeEvent, describeAttachments, describeQuote } from "./events.js"
 
 /** decodeEvent 返回联合类型；消息场景的用例统一收敛到消息事件 */
@@ -337,5 +338,51 @@ describe("decodeEvent / 引用消息", () => {
     }))
 
     expect(event.quote).toBeUndefined()
+  })
+})
+
+describe("decodeEvent / @机器人 与核心 at 段", () => {
+  // 实测报文：群聊 @机器人 时 content 用 openid，mentions 里 is_you=true，
+  // 而适配器的 selfId 是真实 QQ 号（robotUin），两套 id 不同
+  const groupAtBot = {
+    id: "m-at",
+    group_openid: "C8CAEEF5033D4701023E6C16003D2AD4",
+    content: "<@5519A1A02E6BBE79C222FA4611115C66> #消息测试",
+    timestamp: "2026-10-22T13:15:13+08:00",
+    author: { id: "FF23DED2F67B06F46C7A23AE9BB7C5AE", username: "归途守候你", avatar: "", role: "owner" },
+    mentions: [{
+      bot: true,
+      id: "5519A1A02E6BBE79C222FA4611115C66",
+      is_you: true,
+      member_openid: "5519A1A02E6BBE79C222FA4611115C66",
+      username: "阿贝多"
+    }]
+  }
+
+  it("把机器人的提及归一化成 selfId 并带上昵称，对齐 NapCat 的 at 段语义", () => {
+    const event = asMessage(decodeEvent("GROUP_MESSAGE_CREATE", groupAtBot, undefined, "2854196810"))
+    expect(event.message).toEqual([
+      { type: "at", uid: "2854196810", name: "阿贝多" },
+      { type: "text", text: " #消息测试" }
+    ])
+    // 核心 describeMessage 取 `name ?? uid`，日志里因此是 `[@阿贝多]`，不再出现 32 位 id
+    expect(describeMessage(event.message)).toBe("[@阿贝多] #消息测试")
+  })
+
+  it("不传 selfId 时保留 openid，但昵称照补", () => {
+    const event = asMessage(decodeEvent("GROUP_MESSAGE_CREATE", groupAtBot))
+    expect(event.message[0]).toEqual({
+      type: "at",
+      uid: "5519A1A02E6BBE79C222FA4611115C66",
+      name: "阿贝多"
+    })
+  })
+
+  it("mentions 缺失时不做替换，退化为平台原始 id", () => {
+    const event = asMessage(decodeEvent("GROUP_MESSAGE_CREATE", {
+      ...groupAtBot,
+      mentions: undefined
+    }, undefined, "2854196810"))
+    expect(event.message[0]).toEqual({ type: "at", uid: "5519A1A02E6BBE79C222FA4611115C66" })
   })
 })

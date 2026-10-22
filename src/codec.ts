@@ -8,7 +8,7 @@
  *   - @提及使用 <@user_id> 格式
  */
 import type { Segment } from "@yunzai-ng/types"
-import type { Attachment } from "./types.js"
+import type { Attachment, MsgAuthor } from "./types.js"
 import { decodeMedia } from "./media.js"
 
 /** QQ Bot 消息段 */
@@ -105,23 +105,109 @@ export function mapGuildRole(roles: string[]): "owner" | "admin" | "member" {
 }
 
 /**
+ * 解码选项
+ *
+ * 对齐 NapCat 的 at 段语义：`uid` 是平台用户 id，`name` 是展示名，核心日志渲染成
+ * `[@name ?? uid]`、`atMe` 则拿 `uid` 与 `selfId` 比较。
+ *
+ * QQ Bot 的坑在于两套 id：正文 token 里是 openid / 频道用户 id，而 `selfId` 是真实
+ * QQ 号，二者永不相等，群聊 `e.atMe` 因此恒为 false。报文 `mentions` 里
+ * `is_you: true` 的那条就是机器人自己，据此把它的 `uid` 换成 `selfId`。
+ */
+export interface DecodeOptions {
+  /** 适配器认定的自身 id（真实 QQ 号）；核心 `atMe` 与它比较 */
+  selfId?: string
+  /** 报文 `mentions` 中 `is_you` 为真的 id 集合（openid / 频道用户 id 等多种写法） */
+  selfMentions?: readonly string[]
+  /** 报文 `mentions`；用于给 `at` 段补展示名，避免日志里露出那串 32 位 id */
+  mentions?: readonly MsgAuthor[]
+}
+
+/**
+ * 收集 `mentions` 中代表机器人自身的 id
+ *
+ * 同一条提及会在 `id` / `member_openid` / `user_openid` / `union_openid` 里重复给出
+ * 同一个 id，而正文 token 用哪一个并不固定，故四个字段都收进来。
+ * @param mentions 报文 `mentions`
+ * @returns 代表机器人自身的 id 集合
+ */
+export function selfIdsOf(mentions?: readonly MsgAuthor[]): string[] {
+  const ids: string[] = []
+  for (const item of mentions ?? []) {
+    if (item?.is_you !== true) continue
+    for (const id of [item.id, item.member_openid, item.user_openid, item.union_openid]) {
+      if (id) ids.push(id)
+    }
+  }
+  return ids
+}
+
+/**
+ * 从 `mentions` 里查出某条 @ 的展示名
+ *
+ * 核心的 `at` 段渲染规则是 `[@name ?? uid]`，补上 name 就不会把那串
+ * 32 位 openid / 频道用户 id 暴露到日志和回显里。
+ * @param raw 正文 token 里的原始 id
+ * @param mentions 报文 `mentions`
+ * @returns 展示名；查不到时 undefined
+ */
+function mentionName(raw: string, mentions?: readonly MsgAuthor[]): string | undefined {
+  for (const item of mentions ?? []) {
+    if (
+      item.id === raw ||
+      item.member_openid === raw ||
+      item.user_openid === raw ||
+      item.union_openid === raw
+    ) {
+      return item.username
+    }
+  }
+  return undefined
+}
+
+/**
+ * 构造 `at` 段
+ * @param raw 正文 token 里的原始 id
+ * @param guildScope 频道场景；非自身提及加 qg_ 前缀
+ * @param self 解码选项
+ * @returns at 段
+ */
+function atSegment(raw: string, guildScope: boolean, self?: DecodeOptions): Segment {
+  const selfId = self?.selfId
+  // 只有机器人自己换成 selfId：核心据此判定 atMe；其余人的提及保留平台原始 id
+  const uid = selfId && self.selfMentions?.includes(raw)
+    ? selfId
+    : guildScope ? addGuildPrefix(raw) : raw
+  const name = mentionName(raw, self?.mentions)
+  return name ? { type: "at", uid, name } : { type: "at", uid }
+}
+
+/**
  * 解码 QQ Bot 消息
  * @param content 消息内容；纯附件消息（如图片单发）平台不下发该字段，此处按空串处理
  * @param attachments 附件列表
  * @param guildScope 频道场景；@提及的用户 id 加 qg_ 前缀
+ * @param self 自身标识；传入后机器人自己的 @ 换成 `selfId`，其余 @ 补上展示名
  * @returns 通用消息段数组
  */
 export function decodeMessage(
   content: string | undefined,
   attachments?: Attachment[],
-  guildScope = false
+  guildScope = false,
+  self?: DecodeOptions
 ): Segment[] {
   const segments: Segment[] = []
   // 图片/语音/视频单发时平台只给 attachments，content 为 undefined；不能直接取 .length
   const text = content ?? ""
 
   // @、@全体与 QQ 原生表情按出现位置拆开，保留其余原文。
-  const tokenRegex = /<@!?(everyone|\d+)>|<emoji:(\d+)>/g
+  //
+  // 提及有三种写法：
+  //   1. 频道 / 数字 id：`<@123>`、`<@!123>`、`<@everyone>`
+  //   2. 群聊 / 单聊（openid 体系，实测报文）：`<@5519A1A02E6BBE79C222FA4611115C66>` —— 大写十六进制，
+  //      不带斜杠。旧正则只认 `\d+`，这种整段会留在正文里，`^#指令` 前缀命令因此全部匹配失败
+  //   3. 部分客户端 / 文档写法：`<@//<openid>/>`、`<@/<openid>/>`
+  const tokenRegex = /<@!?(everyone|[\w-]+)>|<@!?\/\/?([^>\s/]+)\/?>|<emoji:(\d+)>/g
   let lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = tokenRegex.exec(text)) !== null) {
@@ -131,9 +217,12 @@ export function decodeMessage(
     if (match[1] === "everyone") {
       segments.push({ type: "atAll" })
     } else if (match[1]) {
-      segments.push({ type: "at", uid: guildScope ? addGuildPrefix(match[1]) : match[1] })
+      segments.push(atSegment(match[1], guildScope, self))
     } else if (match[2]) {
-      segments.push({ type: "face", id: Number(match[2]) })
+      // 带斜杠的 openid 提及：群聊 / 单聊场景本就是 openid，频道不会下发这种写法
+      segments.push(atSegment(match[2], guildScope, self))
+    } else if (match[3]) {
+      segments.push({ type: "face", id: Number(match[3]) })
     }
     lastIndex = match.index + match[0].length
   }
