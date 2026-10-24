@@ -8,6 +8,7 @@
  *   - verify: 重新计算签名并与传入的签名做字符串比较
  */
 import nacl from "tweetnacl"
+import { timingSafeEqual } from "node:crypto"
 
 /** 从 secret 生成密钥对（不足 32 字节循环填充） */
 function generateKeyPair(seed: string) {
@@ -36,9 +37,19 @@ export class Ed25519 {
     return Buffer.from(signature).toString("hex")
   }
 
-  /** 验证 webhook 推送签名（重新计算签名并比较） */
+  /**
+   * 验证 webhook 推送签名（重新计算签名并定时安全比较）
+   *
+   * 不用 `===` 比较：字符串比较会在首个不同字符处提前返回，理论上可被逐字节
+   * 掐时间推断出正确签名。这里先同样长再 `timingSafeEqual`。
+   */
   verify(timestamp: string, rawBody: string, ed25519Hex: string): boolean {
     const expected = this.sign(timestamp, rawBody)
-    return expected === ed25519Hex
+    const expectedBytes = Buffer.from(expected, "hex")
+    const actualBytes = Buffer.from(ed25519Hex, "hex")
+
+    // Hex 非法或长度不符时 Buffer 会截断，长度不同直接判否（timingSafeEqual 要求等长）
+    if (expectedBytes.length !== actualBytes.length || expectedBytes.length === 0) return false
+    return timingSafeEqual(expectedBytes, actualBytes)
   }
 }

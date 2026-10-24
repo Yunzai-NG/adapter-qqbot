@@ -12,7 +12,7 @@ import { ACCOUNT_SCHEMA, validateAccount } from "./config.js"
 import type { QQBotAccount } from "./config.js"
 import { createQQBotBot } from "./bot.js"
 import { PLATFORM } from "./codec.js"
-import { createWebhookHandler } from "./webhook.js"
+import { WEBHOOK_CALLBACK_PATH, WEBHOOK_ROUTE_PATH, createWebhookHandler } from "./webhook.js"
 import { webhookRegistry } from "./webhook-registry.js"
 import { createFileRouteHandler, FILE_ROUTE_PATH } from "./file-server.js"
 
@@ -31,12 +31,12 @@ const plugin: PluginDefinition<Record<string, never>> = definePlugin({
 
   setup(ctx) {
     // 注册 webhook 路由：/qqbot（统一入口，通过 header 区分账号）
-    ctx.route("POST", "/qqbot", createWebhookHandler(webhookRegistry), {
+    ctx.route("POST", WEBHOOK_ROUTE_PATH, createWebhookHandler(webhookRegistry, ctx.logger), {
       auth: false,
       rawBody: true,
       bodyLimit: 2 * 1024 * 1024
     })
-    ctx.logger.info("QQ Bot Webhook 路由已注册：/plugin/adapter-qqbot/qqbot")
+    ctx.logger.info(`QQ Bot Webhook 路由已注册：${WEBHOOK_CALLBACK_PATH}（开放平台回调地址填 公网域名 + 该路径）`)
 
     // 注册文件路由：Markdown 图片的公网取回入口（QQ 服务器拉图不走 WebUI 鉴权）
     ctx.route("GET", `${FILE_ROUTE_PATH}/:name`, createFileRouteHandler(), {

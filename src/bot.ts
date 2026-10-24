@@ -49,6 +49,7 @@ import { ImageHost } from "./image-host.js"
 import { OfficialImageHost, normalizeSaveSeconds, sweepIntervalMs } from "./official-image-host.js"
 import { fileUrl, publishFile } from "./file-server.js"
 import { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-registry.js"
+import { WEBHOOK_CALLBACK_PATH, WEBHOOK_ROUTE_PATH } from "./webhook.js"
 import { Ed25519 } from "./ed25519.js"
 
 const SHARE_INFO_URL = "https://qun.qq.com/cgi-bin/group_pro/robot/manager/share_info"
@@ -564,7 +565,33 @@ export function createQQBotBot(
           handler: webhookHandler,
           ed25519
         })
-        host.logger.info(`Webhook 模式已启用，监听路径：${account.listenPath}`)
+
+        // 每次重连都会打，只留一行：当前 Webhook 地址，可直接复制到开放平台
+        const base = host.server.publicUrl.replace(/\/+$/, "")
+        host.logger.info(`[qqbot] Webhook 模式已启用，当前地址为：${base}${WEBHOOK_CALLBACK_PATH}`)
+
+        if (!host.server.enabled) {
+          host.logger.error(
+            "[qqbot] 内置 HTTP 服务未启用（server.enable=false），Webhook 收不到任何回调。" +
+              "请在面板开启内置服务器并配置反向代理后，再到开放平台保存回调地址"
+          )
+        }
+
+        const configuredPath = account.listenPath.trim()
+        if (configuredPath !== WEBHOOK_ROUTE_PATH) {
+          host.logger.warn(
+            `[qqbot] 「Webhook 监听路径」配成了 ${configuredPath}，该配置不参与路由（固定为 ${WEBHOOK_ROUTE_PATH}），按上面给出的地址填即可`
+          )
+        }
+
+        // 自测命令放在 info：出问题时能直接从面板整条复制，不必再调日志级别。
+        // AppID 取自当前账号配置；注意 cmd 不认单引号，故用 --data-raw + 转义双引号
+        host.logger.info(
+          `[qqbot] 本机自测：curl -i -X POST http://127.0.0.1:${host.server.port}${WEBHOOK_CALLBACK_PATH} ` +
+            `-H "content-type: application/json" -H "X-Bot-Appid: ${account.appId}" ` +
+            '--data-raw "{\\"op\\":13,\\"d\\":{\\"plain_token\\":\\"test\\",\\"event_ts\\":\\"1725442341\\"}}"'
+        )
+
         host.setStatus("online")
       } else {
         // WebSocket 模式：使用 Gateway 连接
@@ -581,7 +608,10 @@ export function createQQBotBot(
       if (account.mode === "webhook") {
         // Webhook 模式：注销处理器
         unregisterWebhookHandler(account.appId)
-        host.logger.info("Webhook 模式已断开")
+        host.logger.info(
+          "[qqbot] Webhook 模式已断开；此后开放平台若重新保存回调地址将返回 404，" +
+            "需先重新启动该账号"
+        )
       } else {
         // WebSocket 模式：断开 Gateway
         await gateway.disconnect()
