@@ -1,6 +1,6 @@
 /**
  * 模块职责：账号配置的 schema、类型与校验
- * 依赖方向：仅依赖内核的 schema 工具与类型包
+ * 依赖方向：仅依赖内核的 schema 工具、类型包与本地 URL 判定
  * 生命周期：模块加载期构造一次 schema，之后只读
  * 注意事项：
  *   - QQ Bot 使用 AppID + AppSecret 获取 Access Token
@@ -9,6 +9,7 @@
  */
 import { s, SchemaError } from "@yunzai-ng/core"
 import type { Infer, SchemaIssue } from "@yunzai-ng/core"
+import { isPublicHttpUrl } from "./shared/public-url.js"
 
 /** 网络模式 */
 export type QQBotMode = "websocket" | "webhook"
@@ -170,27 +171,11 @@ export const ACCOUNT_SCHEMA = s.object({
     .group("消息")
     .order(22),
 
-  imageHostType: s
-    .select([
-      {
-        value: "framework",
-        label: "框架图床",
-        description: "用框架内置文件服务把图片发布为临时公网链接，需要公网可达的地址"
-      },
-      {
-        value: "official",
-        label: "官方图床",
-        description: "上传到 QQ 素材库换取 qqbot-media:// 引用，无需公网地址，单机器人上限 100 张"
-      },
-      {
-        value: "external",
-        label: "外置图床",
-        description: "调用自定义 JS 脚本上传到自己的图床，返回公网 URL"
-      }
-    ])
-    .default("framework")
-    .title("图床类型")
-    .desc("Markdown 消息里图片的公网通道。切换后下方只显示该通道需要的配置项")
+  officialImage: s
+    .boolean()
+    .default(true)
+    .title("官方图床")
+    .desc("图片上传的第一级：传到 QQ 素材库换取 qqbot-media:// 引用，不依赖公网地址；配额满且未到释放间隔时回退框架图床")
     .group("图片")
     .order(14),
 
@@ -198,20 +183,10 @@ export const ACCOUNT_SCHEMA = s.object({
     .string()
     .default("")
     .title("文件服务地址")
-    .desc("把渲染图片转公网 URL 供 Markdown 引用。填核心面板的公网地址（如 http://192.168.1.2:2536 或穿透域名），留空则用内核面板地址")
-    .showWhen({ imageHostType: ["framework"] })
+    .desc("图片上传的第二级：把图片发布为临时公网链接。必须是公网可达地址，回环 / 内网地址 QQ 服务器拉不到会被跳过；留空则用内核面板地址")
     .group("图片")
-    .placeholder("http://地址:端口 或 https://穿透域名")
+    .placeholder("https://公网域名 或 http://公网IP:端口")
     .order(16),
-
-  imageHostScript: s
-    .string()
-    .default("")
-    .title("图床脚本路径")
-    .desc("自定义图床 JS 脚本路径，脚本需 export default 一个函数，接收图片数据返回公网 URL。用于在 Markdown 消息中发送图片")
-    .showWhen({ imageHostType: ["external"] })
-    .group("图片")
-    .order(17),
 
   imageSaveSeconds: s
     .number()
@@ -220,7 +195,6 @@ export const ACCOUNT_SCHEMA = s.object({
     .max(7776000)
     .title("图片保存时间（秒）")
     .desc("官方上传任务 4 小时（14400 秒）后自动过期，超过该时长会重新上传；适配器也会按该时间定时清理素材库里的旧图，配额满时同样触发。清理只释放配额，不影响已发送的消息。图片引用本身是滑动过期：被消息引用即顺延，90 天（7776000 秒）未被引用才失效")
-    .showWhen({ imageHostType: ["official"] })
     .group("图片")
     .order(18),
 
@@ -259,12 +233,14 @@ export function validateAccount(input: unknown): QQBotAccount {
     return input as QQBotAccount
   }
 
-  // 旧配置没有图床类型：填过脚本的按外置图床迁移，其余保持框架图床
+  // 旧版的「图床类型」单选已改为链路取址（直链 → 官方 → 框架），「图床脚本路径」也已移除：
+  // 显式选过框架图床的按「关闭官方图床」迁移，其余一律沿用链路默认值；脚本字段由 schema 丢弃
   const source: Record<string, unknown> = { ...inputObj }
-  if (source.imageHostType === undefined) {
-    const script = typeof source.imageHostScript === "string" ? source.imageHostScript.trim() : ""
-    source.imageHostType = script ? "external" : "framework"
+  if (source.imageHostType !== undefined) {
+    if (source.officialImage === undefined) source.officialImage = source.imageHostType !== "framework"
+    delete source.imageHostType
   }
+  delete source.imageHostScript
 
   const account = ACCOUNT_SCHEMA.parse(source)
   const issues: SchemaIssue[] = []
@@ -312,16 +288,21 @@ export function validateAccount(input: unknown): QQBotAccount {
     }
   }
 
-  // 文件服务地址只在框架图床下生效，隐藏字段里的历史值不参与校验
-  if (account.imageHostType === "framework") {
-    const serverAddress = account.serverAddress.trim()
-    if (serverAddress && !/^https?:\/\//i.test(serverAddress)) {
-      issues.push({
-        path: "serverAddress",
-        message: "文件服务地址应以 http:// 或 https:// 开头",
-        severity: "error"
-      })
-    }
+  // 文件服务地址是框架图床（最后一级）的基址，填了就必须是合法 http(s)
+  const serverAddress = account.serverAddress.trim()
+  if (serverAddress && !/^https?:\/\//i.test(serverAddress)) {
+    issues.push({
+      path: "serverAddress",
+      message: "文件服务地址应以 http:// 或 https:// 开头",
+      severity: "error"
+    })
+  } else if (serverAddress && !isPublicHttpUrl(serverAddress)) {
+    // 不拦保存：内网部署常先填内网地址，配合官方图床仍可用；但框架图床那一级会被跳过
+    issues.push({
+      path: "serverAddress",
+      message: "该地址不是公网可达地址（回环 / 内网段），框架图床会被跳过，QQ 服务器拉不到这张图",
+      severity: "warn"
+    })
   }
 
   if (issues.length > 0) throw new SchemaError(issues)

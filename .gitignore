@@ -1,5 +1,6 @@
 node_modules/
 dist/
 dist-test/
+.vitest-tmp/
 *.tsbuildinfo
 .env

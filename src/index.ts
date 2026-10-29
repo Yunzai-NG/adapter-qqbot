@@ -1,6 +1,6 @@
 /**
  * 模块职责：插件入口 - 将 QQ Bot 适配器注册至内核
- * 依赖方向：仅依赖 @yunzai-ng/core 的公开入口与 @yunzai-ng/types
+ * 依赖方向：只经各领域的统一出口（protocol / transport / media / bot）取用，不深引实现文件
  * 生命周期：setup 在插件加载时执行一次，返回后适配器即可被账号引用
  * 注意事项：
  *   - QQ Bot 的登录在 QQ 开放平台完成，不属于本框架流程
@@ -10,18 +10,25 @@ import { definePlugin } from "@yunzai-ng/core"
 import type { AdapterHost, AdapterProvider, BotDriver, PluginDefinition } from "@yunzai-ng/types"
 import { ACCOUNT_SCHEMA, validateAccount } from "./config.js"
 import type { QQBotAccount } from "./config.js"
-import { createQQBotBot } from "./bot.js"
-import { PLATFORM } from "./codec.js"
-import { WEBHOOK_CALLBACK_PATH, WEBHOOK_ROUTE_PATH, createWebhookHandler } from "./webhook.js"
-import { webhookRegistry } from "./webhook-registry.js"
-import { createFileRouteHandler, FILE_ROUTE_PATH } from "./file-server.js"
+import { createQQBotBot } from "./bot/index.js"
+import { CUSTOM_IMAGE_KEY, createFileRouteHandler, FILE_ROUTE_PATH } from "./media/index.js"
+import type { ImageToUrlFn } from "./media/index.js"
+import { PLATFORM } from "./protocol/index.js"
+import {
+  WEBHOOK_CALLBACK_PATH,
+  WEBHOOK_ROUTE_PATH,
+  createWebhookHandler,
+  webhookRegistry
+} from "./transport/index.js"
 
 /** 适配器 id */
 export const ADAPTER_ID = "qqbot"
 
 export { ACCOUNT_SCHEMA, validateAccount } from "./config.js"
 export type { QQBotAccount, QQBotMode } from "./config.js"
-export { registerWebhookHandler, unregisterWebhookHandler } from "./webhook-registry.js"
+export { registerWebhookHandler, unregisterWebhookHandler } from "./transport/index.js"
+export { CUSTOM_IMAGE_KEY } from "./media/index.js"
+export type { ImageFileInput, ImageFileOptions, ImageToUrlFn } from "./media/index.js"
 
 /** 插件定义 */
 const plugin: PluginDefinition<Record<string, never>> = definePlugin({
@@ -53,7 +60,12 @@ const plugin: PluginDefinition<Record<string, never>> = definePlugin({
       validateAccount,
 
       createBot(account: QQBotAccount, host: AdapterHost): BotDriver {
-        return createQQBotBot(account, host, { adapterId: ADAPTER_ID, http: ctx.http })
+        return createQQBotBot(account, host, {
+          adapterId: ADAPTER_ID,
+          http: ctx.http,
+          // 现查服务表：自定义图床插件后加载、热重载、卸载都能立刻反映到取址结果
+          customImage: () => ctx.inject<ImageToUrlFn>(CUSTOM_IMAGE_KEY)
+        })
       }
     }
 
