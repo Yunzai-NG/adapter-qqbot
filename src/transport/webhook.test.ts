@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Ed25519, createWebhookHandler, WEBHOOK_CALLBACK_PATH, type WebhookHandlerInfo } from "./webhook.js"
+import { OpCode } from "../protocol/types.js"
 import type { WSPayload } from "../protocol/types.js"
 
 /** 官方文档给出的签名用例：用它锁住 seed 生成与签名拼接方式 */
@@ -159,17 +160,24 @@ describe("webhook handler", () => {
     const ed25519 = new Ed25519(SECRET)
     const received: unknown[] = []
     const handlers = new Map([[APP_ID, { handler: (_id: string, p: WSPayload) => { received.push(p) }, ed25519 }]])
-    const handler = createWebhookHandler(handlers)
+    const { lines, logger } = collectingLogger()
+    const handler = createWebhookHandler(handlers, logger)
     const packet = { op: 0, id: "DUP-1", t: "AT_MESSAGE_CREATE", d: { id: "MSG-DUP", content: "hi" } }
     const ts = String(Math.floor(Date.now() / 1000))
     const headers = { "x-bot-appid": APP_ID, "x-signature-ed25519": ed25519.sign(ts, JSON.stringify(packet)), "x-signature-timestamp": ts }
 
-    const first = (await handler(request(packet, headers))) as { body: { message: string } }
-    const second = (await handler(request(packet, headers))) as { body: { message: string } }
+    const first = (await handler(request(packet, headers))) as { status: number; body: { op: number } }
+    const second = (await handler(request(packet, headers))) as { status: number; body: { op: number } }
 
-    expect(first.body.message).toBe("success")
-    expect(second.body.message).toBe("duplicate")
+    // 两次都回 op=12（官方 HTTP 回调 ACK）：重复投递不是错误，平台重试也不该收到非 200
+    expect(first.status).toBe(200)
+    expect(first.body.op).toBe(OpCode.HTTP_CALLBACK_ACK)
+    expect(second.status).toBe(200)
+    expect(second.body.op).toBe(OpCode.HTTP_CALLBACK_ACK)
+
+    // 去重靠的是「只投递一次 + 记一条日志」，不是靠响应体区分
     expect(received).toHaveLength(1)
+    expect(lines.filter(line => line.includes("事件重复投递"))).toHaveLength(1)
   })
 
   it("logs a signature mismatch on op=0", async () => {

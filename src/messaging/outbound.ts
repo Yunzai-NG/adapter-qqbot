@@ -58,6 +58,9 @@ export interface OutboundContext {
   warn?: (message: string) => void
 }
 
+/** 正文以 Markdown 图片描述符结尾（QQ 图片是行内元素，其后直接续写会挤在同一行） */
+const TRAILING_IMAGE = /!\[[^\]\r\n]*\]\([^)\r\n]*\)$/
+
 /** raw qqbot media 私有段数据 */
 interface RawMediaData {
   ref?: MediaRef
@@ -115,8 +118,21 @@ export function buildOutbound(
   let pendingKeyboard: KeyboardPayload | undefined
 
   const warn = (message: string): void => context.warn?.(`[qqbot] ${message}`)
+  /**
+   * 往当前正文尾部续写一段内容
+   *
+   * QQ 的图片是**行内元素**：正文停在图片描述符上、后面直接续写文字时，文字会被挤到图片右侧
+   * 同一行（标题只剩「【复」在图片边上，其余折到下一行）。所以图片后还有内容时补一个换行，
+   * 让独立图片段自成一段。图片本就允许跟在文字后面，因此不补前置换行。
+   */
+  const continueContent = (text: string): void => {
+    if (!text) return
+    const afterImage = !/^[\r\n]/.test(text) && TRAILING_IMAGE.test(content)
+    content += afterImage ? `\r${text}` : text
+  }
+
   const append = (text: string): void => {
-    content += mode === "legacy" ? text : escapeMarkdown(text, mode === "template")
+    continueContent(mode === "legacy" ? text : escapeMarkdown(text, mode === "template"))
   }
 
   const push = (message: OutboundMessage): void => {
@@ -180,14 +196,20 @@ export function buildOutbound(
     push({ request: { msg_type: 2, markdown } })
   }
 
+  /**
+   * 核心 Markdown 段并入当前正文，而不是单独成条
+   *
+   * QQ 的 Markdown 消息天然支持图文混排：一段文字和紧随其后的 `![..](url)` 图片描述符属于
+   * 同一条消息。此前这里把 Markdown 段当作独立消息推送，导致「一句话 + 一张图」被拆成两条，
+   * 图片也各占一条。现在一律累加进 content，由富元素边界或消息末尾统一发出。
+   *
+   * 但 QQ 的图片是**行内元素**：正文停在图片描述符上时直接续写下文，文字会被挤到图片右侧同一行
+   * （标题只剩「【复」在图片边上，其余折到下一行）。所以图片后面还有内容时补一个换行，
+   * 让独立图片段自成一段。图片本就允许跟在文字后面，因此不补前置换行。
+   */
   const emitCoreMarkdown = (markdown: string): void => {
-    if (mode === "template" && context.markdownTemplateId) {
-      emitText()
-      content += markdown.replace(/\n/g, "\r")
-      emitText()
-      return
-    }
-    emitMarkdown({ content: guild ? markdown.replace(/force_verify_image_resource/g, "") : markdown })
+    const normalized = mode === "template" ? markdown.replace(/\n/g, "\r") : markdown
+    continueContent(guild ? normalized.replace(/force_verify_image_resource/g, "") : normalized)
   }
 
   const emitKeyboard = (rows: readonly (readonly KeyboardButton[])[]): void => {

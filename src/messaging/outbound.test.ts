@@ -204,6 +204,83 @@ describe("buildOutbound", () => {
     expect(messages[0].request.keyboard).toEqual({ id: "template-id", bot_appid: "app-id" })
   })
 
+  it("keeps core Markdown in the same message as the text around it", () => {
+    const messages = buildOutbound([
+      { type: "text", text: "前" },
+      { type: "markdown", content: "**粗**" },
+      { type: "text", text: "后" }
+    ], rawContext)
+
+    // 一条 Markdown 消息本来就支持图文 / 富文本混排，不该为它另开一条
+    expect(messages).toEqual([{ request: { msg_type: 2, markdown: { content: "前**粗**后" } } }])
+  })
+
+  it("merges every Markdown image into one message in source order", () => {
+    const segments: Segment[] = [
+      { type: "text", text: "看图" },
+      { type: "markdown", content: "![一号 #10px #10px](https://example.test/1.png)" },
+      { type: "text", text: "和图" },
+      { type: "markdown", content: "![二号 #20px #20px](https://example.test/2.png)" }
+    ]
+    const messages = buildOutbound(segments, rawContext)
+
+    expect(messages).toHaveLength(1)
+    // 图片可以跟在文字后面（行内），但图片之后再有内容就另起一行
+    expect(messages[0].request.markdown?.content).toBe(
+      "看图![一号 #10px #10px](https://example.test/1.png)\r和图![二号 #20px #20px](https://example.test/2.png)"
+    )
+  })
+
+  it("breaks the line after an image so the following title is not squeezed beside it", () => {
+    // 今日小猪的排版：@用户 + 整张图 + 标题 + 引用块。QQ 的图片是行内元素，
+    // 标题紧贴描述符会被挤到图片右侧，只剩「【复」在图片边上、其余折到下一行。
+    const messages = buildOutbound([
+      { type: "at", uid: "u-1", name: "归途守候你" },
+      { type: "markdown", content: "![图片 #1000px #1000px](https://example.test/pig.png)" },
+      { type: "markdown", content: "**【复读猪】**\r> 群聊本质复读机" }
+    ], rawContext)
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].request.markdown?.content).toBe(
+      '<qqbot-at-user id="u-1" />![图片 #1000px #1000px](https://example.test/pig.png)\r**【复读猪】**\r> 群聊本质复读机'
+    )
+  })
+
+  it("does not add a blank line when the following Markdown already starts a new line", () => {
+    const messages = buildOutbound([
+      { type: "markdown", content: "![图片 #10px #10px](https://example.test/a.png)" },
+      { type: "markdown", content: "\r正文" }
+    ], rawContext)
+
+    expect(messages[0].request.markdown?.content).toBe(
+      "![图片 #10px #10px](https://example.test/a.png)\r正文"
+    )
+  })
+
+  it("still gives a real rich-media element its own message", () => {
+    // Markdown 能承载图文混排，但富媒体（msg_type=7）与 Ark 这类独占元素仍必须单独成条
+    const messages = buildOutbound([
+      { type: "text", text: "说明" },
+      { type: "image", file: { kind: "url", url: "https://example.test/1.png" } }
+    ], rawContext)
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0].request.markdown?.content).toBe("说明")
+    expect(messages[1].upload).toMatchObject({ fileType: 1 })
+  })
+
+  it("attaches a keyboard to merged Markdown text", () => {
+    const messages = buildOutbound([
+      { type: "text", text: "前" },
+      { type: "markdown", content: "**粗**" },
+      { type: "keyboard", rows: [[{ label: "运行", action: "input", data: "/run" }]] }
+    ], rawContext)
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].request.markdown?.content).toBe("前**粗**")
+    expect(messages[0].request.keyboard).toBeDefined()
+  })
+
   it("builds configured template payloads for core Markdown", () => {
     const messages = buildOutbound([{ type: "markdown", content: "第一行\n第二行" }], {
       scene: "group",
@@ -222,6 +299,22 @@ describe("buildOutbound", () => {
         }
       }
     }])
+  })
+
+  it("packs text before a Markdown segment into the same template message", () => {
+    const messages = buildOutbound([
+      { type: "text", text: "标题" },
+      { type: "markdown", content: "正文" }
+    ], {
+      scene: "group",
+      markdownEnabled: true,
+      markdownMode: "template",
+      markdownTemplateId: "template-id",
+      markdownTemplateKeys: "ab"
+    })
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].request.markdown?.params).toEqual([{ key: "a", values: ["标题正文"] }])
   })
 
   it("downgrades a guild raw file_info image to text", () => {
