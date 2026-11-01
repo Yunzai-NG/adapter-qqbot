@@ -16,6 +16,7 @@ import { OfficialImageHost } from "../media/official-image-host.js"
 import { ImageResolver } from "../media/image-to-url.js"
 import type { ImageToUrlFn } from "../media/image-to-url.js"
 import { resolveMedia } from "../media/resolve.js"
+import { resolveImageLimits } from "../media/limits.js"
 import type { SendMessageRequest, SendMessageResponse } from "../protocol/types.js"
 import { createMessageDeduper, createSequenceTracker } from "./reply-guard.js"
 import type { MessageDeduper, SequenceTracker } from "./reply-guard.js"
@@ -110,7 +111,11 @@ export interface BotContext {
 export function createBotContext(account: QQBotAccount, host: AdapterHost, deps: BotDeps): BotContext {
   const tokenManager = new TokenManager(account, deps.http, host.logger)
   const api = new ApiClient(tokenManager, deps.http, host.logger)
-  const uploader = new MediaUploader(api, deps.http, host.logger)
+  // 群聊 / C2C 富媒体只认平台自身的软限（20MB），配置项只约束频道，故这里取 group 阈值
+  const mediaLimits = resolveImageLimits(account.imageMaxSizeMb)
+  const uploader = new MediaUploader(api, deps.http, host.logger, {
+    imageMaxBytes: mediaLimits.group
+  })
   // 官方图床：按账号一个实例，本地去重缓存随进程存活
   const officialImageHost = new OfficialImageHost(api, deps.http, host.logger, account.imageSaveSeconds)
 

@@ -7,6 +7,7 @@
  *   - 其余来源走官方协议：upload_prepare → PUT 分片 → upload_part_finish → files 合并
  *   - kind:"id" 视为平台已有的 file_info，直接回填，不再上传
  *   - md5 / sha1 用 node:crypto，不引入新依赖
+ *   - 拿到字节后先经 media/transform 整形：超限图片压缩、语音转 SILK
  * @see https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html
  */
 import { createHash } from "node:crypto"
@@ -14,6 +15,7 @@ import type { HttpClient, Logger, MediaRef } from "@yunzai-ng/types"
 import type { ApiClient } from "./api.js"
 import type { UploadConfig, UploadMediaResponse } from "../protocol/types.js"
 import { DEFAULT_FILE_NAMES, resolveMedia, type MediaFileType } from "../media/resolve.js"
+import { prepareMediaForSend, shouldTranscodeBeforeTransfer } from "../media/transform.js"
 
 /** 官方分片上传用：文件前 10002432 字节（约 9.54MB）的 MD5 */
 const MD5_10M_SIZE = 10_002_432
@@ -40,6 +42,12 @@ interface ResolvedUploadConfig {
   concurrency: number
   retryTimeout: number
   retryDelay: number
+}
+
+/** 上传器的可选能力配置 */
+export interface UploaderOptions {
+  /** 图片体积上限（字节），群聊 / 单聊取平台软限 20 MB；0 表示不压缩 */
+  imageMaxBytes?: number
 }
 
 function md5Hex(data: Buffer): string {
@@ -112,11 +120,13 @@ export class MediaUploader {
    * @param api QQ Bot REST 客户端
    * @param http 内核 HTTP 客户端（下载源文件与 PUT 预签名分片）
    * @param logger 日志器
+   * @param options 增强能力配置（群聊 / 单聊的图片软限阈值）
    */
   constructor(
     private api: ApiClient,
     private http: HttpClient,
-    private logger: Logger
+    private logger: Logger,
+    private options: UploaderOptions = {}
   ) {}
 
   /**
@@ -131,8 +141,11 @@ export class MediaUploader {
       return { file_uuid: ref.id, file_info: ref.id, ttl: 0 }
     }
 
+    // 语音多半要转 SILK，平台转存拿不到可整形的字节，这类直链先在本机取回
+    const localize = ref.kind === "url" && shouldTranscodeBeforeTransfer(options.fileType, ref.url)
+
     // 公网 URL 优先交给平台转存，不占本机内存；失败时改由本机下载并分片上传。
-    if (ref.kind === "url") {
+    if (ref.kind === "url" && !localize) {
       try {
         return await this.api.commitFile(options.target, options.targetId, {
           file_type: options.fileType,
@@ -145,11 +158,7 @@ export class MediaUploader {
           `[qqbot] QQ URL 转存失败，改用本地分片上传（类型 ${options.fileType}，目标 ${options.target}）`
         )
         try {
-          const resolved = await resolveMedia(ref, this.http)
-          return await this.uploadByChunks(resolved.buffer, {
-            ...options,
-            fileName: options.fileName ?? resolved.fileName
-          })
+          return await this.uploadPrepared(ref, options)
         } catch (fallbackError) {
           const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
           throw new Error(`QQ URL 转存与本地分片上传均失败：${message}`, { cause: transferError })
@@ -157,11 +166,29 @@ export class MediaUploader {
       }
     }
 
+    return this.uploadPrepared(ref, options)
+  }
+
+  /**
+   * 取字节 → 整形（压图 / 转 SILK）→ 分片上传
+   * @param ref 媒体引用，不能是 kind:"id"
+   * @param options 上传参数
+   * @returns 含 file_info 的上传结果
+   */
+  private async uploadPrepared(ref: MediaRef, options: UploadOptions): Promise<UploadMediaResponse> {
     const resolved = await resolveMedia(ref, this.http)
-    return this.uploadByChunks(resolved.buffer, {
-      ...options,
-      fileName: options.fileName ?? resolved.fileName
+    const prepared = await prepareMediaForSend(resolved, options.fileType, {
+      imageMaxBytes: this.options.imageMaxBytes ?? 0,
+      logger: this.logger
     })
+    if (prepared.changed) {
+      this.logger.debug(`[qqbot] ${prepared.note}，将按整形结果上传`)
+    }
+    // 整形后扩展名可能变了（png → jpg、wav → silk），此时以整形结果为准
+    const fileName = prepared.changed
+      ? prepared.fileName ?? resolved.fileName
+      : options.fileName ?? resolved.fileName
+    return this.uploadByChunks(prepared.buffer, { ...options, fileName })
   }
 
   /**

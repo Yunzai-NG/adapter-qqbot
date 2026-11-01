@@ -202,8 +202,8 @@ export const ACCOUNT_SCHEMA = s.object({
     .number()
     .default(4)
     .min(1)
-    .title("图片压缩上限（MiB）")
-    .desc("sharp 可用时将超限图片压缩；未安装则原样发送")
+    .title("频道图片压缩上限（MiB）")
+    .desc("只约束频道图片（multipart 直传）：超过该值才压缩，未超的原样发送。群聊 / 单聊富媒体图片按平台软限 20 MB、Markdown 官方素材库按 10 MB 处理，不受该项影响。未安装 sharp 时一律原样发送")
     .group("图片")
     .order(19),
 
@@ -216,8 +216,19 @@ export const ACCOUNT_SCHEMA = s.object({
     .order(20)
 })
 
-/** 账号配置类型 */
-export type QQBotAccount = Infer<typeof ACCOUNT_SCHEMA>
+/** 面板与存储里的账号配置：含 `subscription`（预设订阅），不含运行时算出的 `intents` */
+export type QQBotAccountInput = Infer<typeof ACCOUNT_SCHEMA>
+
+/**
+ * 校验后的账号配置
+ *
+ * 与输入的区别：`subscription` 已按 `PRESET_INTENTS` 换算成 `intents` 并从对象里移除，
+ * 运行时不再需要预设名。`intents` 只在 WebSocket 模式存在 —— Webhook 没有订阅位这一说。
+ */
+export type QQBotAccount = Omit<QQBotAccountInput, "subscription"> & {
+  /** 鉴权时上报的订阅位；WebSocket 模式由 `validateAccount` 算好，Webhook 模式没有 */
+  intents?: number
+}
 
 /**
  * 校验账号配置

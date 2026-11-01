@@ -9,16 +9,34 @@
  */
 import type { Logger } from "@yunzai-ng/types"
 
+/** sharp 读到的图片元信息（仅声明本适配器用到的方法） */
+export interface SharpMeta {
+  /** 宽（像素） */
+  width?: number
+  /** 高（像素） */
+  height?: number
+  /** 编码格式，如 png / jpeg / gif / webp / svg */
+  format?: string
+  /** 文件字节数 */
+  size?: number
+  /** 页数，动图大于 1 */
+  pages?: number
+  /** 是否带 alpha 通道 */
+  hasAlpha?: boolean
+}
+
 /** sharp 图像实例（仅声明本适配器用到的方法） */
 export interface SharpImage {
   /** 读取图片元信息 */
-  metadata(): Promise<{ width?: number; height?: number; format?: string; size?: number }>
+  metadata(): Promise<SharpMeta>
   /** 缩放 */
   resize(options: { width?: number; height?: number; fit?: "inside" | "outside" | "cover"; withoutEnlargement?: boolean }): SharpImage
+  /** 压平到指定底色（JPEG 无 alpha，转 jpeg 前必须先压平） */
+  flatten(options?: { background?: string }): SharpImage
   /** 转 JPEG */
   jpeg(options?: { quality?: number }): SharpImage
   /** 转 PNG */
-  png(options?: { quality?: number; compressionLevel?: number }): SharpImage
+  png(options?: { quality?: number; compressionLevel?: number; palette?: boolean }): SharpImage
   /** 转 WebP */
   webp(options?: { quality?: number }): SharpImage
   /** 输出字节 */
@@ -38,12 +56,16 @@ export interface QrcodeModule {
 
 /** silk-wasm 模块（仅声明用到的方法） */
 export interface SilkModule {
-  /** 编码为 silk */
-  encode(input: Uint8Array, sampleRate: number): Promise<{ data: Uint8Array }>
+  /** 编码为 silk；输入须为 WAV（sampleRate 传 0）或单声道 pcm_s16le */
+  encode(input: Uint8Array, sampleRate: number): Promise<{ data: Uint8Array; duration: number }>
   /** 解码 silk */
-  decode(input: Uint8Array, sampleRate: number): Promise<{ data: Uint8Array }>
+  decode(input: Uint8Array, sampleRate: number): Promise<{ data: Uint8Array; duration: number }>
   /** 计算时长（毫秒） */
   getDuration(silk: Uint8Array, frameMs?: number): number
+  /** 是否 silk 文件 */
+  isSilk(data: Uint8Array): boolean
+  /** 是否 WAV 文件 */
+  isWav(data: Uint8Array): boolean
 }
 
 function importOptional(name: string): Promise<unknown> {

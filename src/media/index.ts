@@ -5,6 +5,8 @@
  * 注意事项：图片「从哪来、传到哪去、能不能被 QQ 拉到」全部收敛在本目录
  */
 export * from "./resolve.js"
+export * from "./transform.js"
+export * from "./limits.js"
 export * from "./image-to-url.js"
 export * from "./official-image-host.js"
 export * from "./file-server.js"

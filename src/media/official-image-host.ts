@@ -29,8 +29,8 @@ const EXT_BY_MIME: Record<string, string> = {
   "image/webp": "webp"
 }
 
-/** 单张图片大小上限：10MB */
-const MAX_BYTES = 10 * 1024 * 1024
+/** 单张图片大小上限：10MB（平台硬限，压缩阈值也复用它） */
+export const MAX_MEDIA_IMAGE_BYTES = 10 * 1024 * 1024
 
 /** 平台滑动有效期上限：90 天 = 7776000 秒 */
 export const MAX_SAVE_SECONDS = 7_776_000
@@ -194,7 +194,7 @@ export class OfficialImageHost {
       this.logger.warn(`[qqbot] 官方图床不支持该图片格式（${options?.mime ?? "未知"}），仅接受 png/jpeg/gif/webp`)
       return null
     }
-    if (buffer.length > MAX_BYTES) {
+    if (buffer.length > MAX_MEDIA_IMAGE_BYTES) {
       this.logger.warn(`[qqbot] 官方图床单张上限 10MB，当前 ${(buffer.length / 1024 / 1024).toFixed(2)}MB`)
       return null
     }

@@ -1,11 +1,12 @@
 /**
  * 模块职责：出站消息 —— 发送、转发、撤回、表态，以及 Markdown 发送前的图片转址
- * 依赖方向：依赖 messaging/outbound（段编译）、media（取址）与 protocol（Markdown 描述符）
+ * 依赖方向：依赖 messaging/outbound（段编译）、media（取址 / 整形）与 protocol（Markdown 描述符）
  * 生命周期：随 createQQBotBot 创建一次，方法无内部状态，状态全在 BotContext
  * 注意事项：
  *   - 平台限制一条消息只带一个富元素，故先编译成多条计划再逐条发送
  *   - Markdown 开启时图片一律转公网地址写进 Markdown，绝不走富媒体接口
  *   - 至少一条送达即返回成功，失败明细留在 raw，避免上层把已投递内容误判为全失败
+ *   - 频道图片按配置的频道上限整形，Markdown 图床按素材库 10 MB 硬限整形，sharp 缺失时原样发送
  */
 import { toSegments } from "@yunzai-ng/core"
 import type {
@@ -22,6 +23,9 @@ import { buildOutbound } from "../messaging/outbound.js"
 import type { OutboundMessage } from "../messaging/outbound.js"
 import { getImageSize } from "../media/probe.js"
 import { mediaUrl, resolveMedia } from "../media/resolve.js"
+import type { ResolvedMedia } from "../media/resolve.js"
+import { prepareMediaForSend } from "../media/transform.js"
+import { resolveImageLimits } from "../media/limits.js"
 import { MESSAGE_TARGET_TTL } from "./context.js"
 import type { BotContext } from "./context.js"
 
@@ -45,6 +49,30 @@ interface ConvertedImage {
 export function createSender(ctx: BotContext): SendApi {
   const { account, host, deps } = ctx
 
+  /** 配置项只约束频道，图床与群聊各用平台自身的默认上限 */
+  const imageLimits = resolveImageLimits(account.imageMaxSizeMb)
+
+  /**
+   * 按指定阈值整形图片字节
+   *
+   * 频道 multipart 用配置值；Markdown 图床用素材库的 10 MiB 硬限（超了平台直接拒），
+   * 群聊 / C2C 的整形在上传器里按 20 MiB 软限做，不经过这里。
+   * 扩展名与 MIME 以整形结果为准。
+   */
+  async function prepareImage(media: ResolvedMedia, maxBytes: number): Promise<ResolvedMedia> {
+    const prepared = await prepareMediaForSend(media, 1, {
+      imageMaxBytes: maxBytes,
+      logger: host.logger
+    })
+    if (!prepared.changed) return media
+    host.logger.debug(`[qqbot] ${prepared.note}，将按整形结果发送`)
+    return {
+      buffer: prepared.buffer,
+      fileName: prepared.fileName ?? media.fileName,
+      mime: prepared.mime ?? media.mime
+    }
+  }
+
   /**
    * 单张图片转公网 URL：走三级链路（自定义 → 官方 → 框架），全都不可用时返回 undefined
    *
@@ -52,7 +80,7 @@ export function createSender(ctx: BotContext): SendApi {
    */
   async function convertMarkdownImage(segment: Extract<Segment, { type: "image" }>): Promise<ConvertedImage | undefined> {
     try {
-      const resolved = await resolveMedia(segment.file, deps.http)
+      const resolved = await prepareImage(await resolveMedia(segment.file, deps.http), imageLimits.mediaHost)
       const size = getImageSize(resolved.buffer) ?? undefined
       const result = await ctx.imageResolver.toUrlFromMedia(resolved, mediaUrl(segment.file))
       if (result) {
@@ -143,7 +171,8 @@ export function createSender(ctx: BotContext): SendApi {
     }
 
     if (message.guildBlob) {
-      const { buffer } = await resolveMedia(message.guildBlob, deps.http)
+      // 频道图片走 multipart 直传，按配置的频道阈值整形
+      const { buffer } = await prepareImage(await resolveMedia(message.guildBlob, deps.http), imageLimits.channel)
       if (target.scene === "guild") response = await ctx.api.sendGuildMessageWithImage(target.channelId, request, buffer)
       else if (target.scene === "private" && ctx.isGuildTransport(target)) {
         response = await ctx.api.sendDirectMessageWithImage(ctx.directMessageGuildMap.get(target.uid)!, request, buffer)

@@ -203,7 +203,8 @@ export function createConnection(ctx: BotContext): ConnectionApi {
         host.setStatus("offline", { error: reason })
       }
     },
-    host.logger
+    host.logger,
+    { resolveUrl: async () => (await ctx.api.call<{ url?: string }>("GET", "/gateway")).url ?? "" }
   )
 
   /** Webhook 模式的注册与提示 */

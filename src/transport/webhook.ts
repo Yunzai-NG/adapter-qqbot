@@ -318,14 +318,11 @@ export function createWebhookHandler(
 
         if (eventId !== undefined && alreadySeen(`${appId}:${packet.t ?? ""}:${eventId}`)) {
           logger?.debug(`[qqbot] 事件重复投递，已跳过：appid=${appId} t=${packet.t ?? "-"} id=${eventId}`)
-          return { status: 200, body: { code: 0, message: "duplicate" } }
+          return { status: 200, body: { op: OpCode.HTTP_CALLBACK_ACK } }
         }
 
         handlerInfo.handler(appId, packet)
-        return {
-          status: 200,
-          body: { code: 0, message: "success" }
-        }
+        return { status: 200, body: { op: OpCode.HTTP_CALLBACK_ACK } }
       }
 
       default:

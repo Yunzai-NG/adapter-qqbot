@@ -5,6 +5,27 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，  
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-11-01
+
+### 新增
+
+- **图片压缩（`sharp`）**：超过上限才压，先降 JPEG 质量（82 → 58），还超就缩图；动图与 SVG 跳过。
+  群聊 / 单聊上传、频道图片、Markdown 图床三处都会走。
+- **语音转 SILK（`silk-wasm`）**：已是 SILK 直接发，WAV 直接转，mp3 / amr 等先经 `ffmpeg` 解成 PCM 再转；
+  没有 `ffmpeg` 就原样上传。语音直链也改成本机转好再上传。
+- **`scripts/probe-limits.mjs`**：探测各链路真实的大小与长度上限。
+
+### 变更
+
+- **图片上限只管频道**：`图片压缩上限` 改名为 `频道图片压缩上限`，群聊 / 单聊按平台 20 MB、素材库按 10 MB，
+  不再被频道的 4 MiB 连带压小。字段名没变，旧配置不用迁移。
+- 可选依赖缺失时一律原样发送，不影响收发（`qrcode` 仍无调用方）。
+
+### 文档
+
+- 新增 `docs/MEDIA.md`、`docs/MESSAGING.md`、`docs/DEVELOPMENT.md`。
+- 标注配套图床插件 ImageBed-Plugin。
+
 ## [0.4.0] - 2026-10-24
 
 ### 修复
