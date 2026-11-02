@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { HttpClient, MediaRef } from "@yunzai-ng/types"
 import { decodeMedia, inferFileType, mediaUrl, normalizeUrl, resolveMedia } from "./resolve.js"
+import { detectImageMime } from "./probe.js"
 
 describe("decodeMedia / QQ 附件 → MediaRef", () => {
   it("takes the native url and adds a missing scheme", () => {
@@ -100,3 +101,57 @@ describe("media helpers", () => {
       .rejects.toThrow("不应调用 resolveMedia")
   })
 })
+
+describe("base64 / buffer 引用的 MIME 嗅探", () => {
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+    Buffer.alloc(8),
+    (() => { const b = Buffer.alloc(8); b.writeUInt32BE(375, 0); b.writeUInt32BE(667, 4); return b })()
+  ])
+
+  it("sniffs image MIME from magic bytes when the reference carries none", async () => {
+    const base64 = await resolveMedia(
+      { kind: "base64", base64: png.toString("base64") }, {} as HttpClient
+    )
+    expect(base64.mime).toBe("image/png")
+
+    const buffer = await resolveMedia(
+      { kind: "buffer", data: new Uint8Array(png) }, {} as HttpClient
+    )
+    expect(buffer.mime).toBe("image/png")
+  })
+
+  it("keeps explicit mime and falls back to sniffing only for unknown names", async () => {
+    const jpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 2, 0, 0, 0, 0, 0, 0])
+    const explicit = await resolveMedia(
+      { kind: "base64", base64: png.toString("base64"), mime: "image/png" }, {} as HttpClient
+    )
+    expect(explicit.mime).toBe("image/png")
+
+    const named = await resolveMedia(
+      { kind: "buffer", data: new Uint8Array(jpeg), name: "qr.webp" }, {} as HttpClient
+    )
+    expect(named.mime).toBe("image/webp")
+
+    const sniffed = await resolveMedia(
+      { kind: "buffer", data: new Uint8Array(jpeg), name: "qr.bin" }, {} as HttpClient
+    )
+    expect(sniffed.mime).toBe("image/jpeg")
+
+    const unknown = await resolveMedia(
+      { kind: "base64", base64: Buffer.from("plain text").toString("base64") }, {} as HttpClient
+    )
+    expect(unknown.mime).toBeUndefined()
+  })
+
+  it("detects the four formats accepted by the official image host", () => {
+    const webp = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 ")])
+    expect(detectImageMime(png)).toBe("image/png")
+    expect(detectImageMime(Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 2, 0, 0, 0, 0, 0, 0]))).toBe("image/jpeg")
+    expect(detectImageMime(Buffer.from("GIF89a........"))).toBe("image/gif")
+    expect(detectImageMime(webp)).toBe("image/webp")
+    expect(detectImageMime(Buffer.from("BM...."))).toBeUndefined()
+    expect(detectImageMime(Buffer.from([1, 2, 3]))).toBeUndefined()
+  })
+})
+

@@ -13,6 +13,7 @@ import type { HttpClient, MediaRef } from "@yunzai-ng/types"
 import { readFile } from "node:fs/promises"
 import { basename } from "node:path"
 import type { Attachment } from "../protocol/types.js"
+import { detectImageMime } from "./probe.js"
 
 /** QQ 富媒体类型：1=图片 2=视频 3=语音 4=文件 */
 export type MediaFileType = 1 | 2 | 3 | 4
@@ -162,9 +163,16 @@ export async function resolveMedia(ref: MediaRef, http: HttpClient): Promise<Res
       return { buffer, fileName, mime: guessMime(fileName) }
     }
     case "buffer":
-      return { buffer: Buffer.from(ref.data), fileName: ref.name, mime: ref.mime ?? guessMime(ref.name) }
-    case "base64":
-      return { buffer: Buffer.from(ref.base64, "base64"), mime: ref.mime }
+      return {
+        buffer: Buffer.from(ref.data),
+        fileName: ref.name,
+        mime: ref.mime ?? guessMime(ref.name) ?? detectImageMime(Buffer.from(ref.data))
+      }
+    case "base64": {
+      // `base64://` 不携带 MIME（data URI 才有），而三级图床都靠它判断格式与文件名，按魔数兜底
+      const buffer = Buffer.from(ref.base64, "base64")
+      return { buffer, mime: ref.mime ?? detectImageMime(buffer) }
+    }
     case "id":
       throw new Error('kind:"id" 是平台已有的 file_info，不应调用 resolveMedia')
   }
